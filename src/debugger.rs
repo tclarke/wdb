@@ -1,9 +1,25 @@
 use crate::disasm::disassemble;
 use crate::machine::{Machine, Output, IP};
-use crate::tape::{parse_tape_file, TapeEntry};
+use crate::tape::{parse_tape_file, TapeEntry, WitchNum};
+use colored::Colorize;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+fn use_color() -> bool {
+    colored::control::SHOULD_COLORIZE.should_colorize()
+}
+
+fn color_num(n: WitchNum) -> String {
+    let s = n.to_string();
+    if n.magnitude == 0 {
+        s
+    } else if n.negative {
+        s.red().to_string()
+    } else {
+        s.green().to_string()
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum BpKind {
@@ -127,7 +143,7 @@ impl Debugger {
             }
             "help" | "h" | "?" => Self::cmd_help(),
             "quit" | "exit" | "q" => std::process::exit(0),
-            cmd => vec![format!("unknown command '{}' (type 'help' for help)", cmd)],
+            cmd => vec![format!("unknown command '{}' (type 'help' for help)", cmd).red().to_string()],
         }
     }
 
@@ -135,7 +151,7 @@ impl Debugger {
 
     fn cmd_run(&mut self) -> Vec<String> {
         if self.machine.halted {
-            return vec!["machine halted; use 'reset' to restart".to_string()];
+            return vec!["machine halted; use 'reset' to restart".yellow().to_string()];
         }
         let running = Arc::new(AtomicBool::new(true));
         let r = running.clone();
@@ -146,7 +162,7 @@ impl Debugger {
         let mut output = Vec::new();
         loop {
             if !running.load(Ordering::SeqCst) {
-                output.push("^C — interrupted".to_string());
+                output.push("^C — interrupted".yellow().to_string());
                 break;
             }
             if let Some(msg) = self.check_breakpoints() {
@@ -157,7 +173,7 @@ impl Debugger {
                 Ok(outs) => output.extend(outs.into_iter().flat_map(format_output)),
                 Err(reason) => {
                     output.extend(self.machine.take_incomplete_line().into_iter().flat_map(format_output));
-                    output.push(format!("halted: {}", reason));
+                    output.push(format!("{} {}", "halted:".bold().red(), reason));
                     break;
                 }
             }
@@ -167,14 +183,14 @@ impl Debugger {
 
     fn cmd_step(&mut self) -> Vec<String> {
         if self.machine.halted {
-            return vec!["machine halted; use 'reset' to restart".to_string()];
+            return vec!["machine halted; use 'reset' to restart".yellow().to_string()];
         }
         let mut out = Vec::new();
         match self.machine.step() {
             Ok(outs) => out.extend(outs.into_iter().flat_map(format_output)),
             Err(reason) => {
                 out.extend(self.machine.take_incomplete_line().into_iter().flat_map(format_output));
-                out.push(format!("halted: {}", reason));
+                out.push(format!("{} {}", "halted:".bold().red(), reason));
                 return out;
             }
         }
@@ -185,7 +201,7 @@ impl Debugger {
     fn cmd_skip(&mut self) -> Vec<String> {
         match self.machine.skip() {
             Ok(()) => self.show_position(),
-            Err(e) => vec![format!("error: {}", e)],
+            Err(e) => vec![format!("{} {}", "error:".red(), e)],
         }
     }
 
@@ -193,25 +209,34 @@ impl Debugger {
         let tape_num = tape_num.unwrap_or_else(|| self.machine.active_tape_num().unwrap_or(1));
         let tape = match self.machine.tape_ref(tape_num) {
             Some(t) => t,
-            None => return vec![format!("tape {} not loaded or empty", tape_num)],
+            None => return vec![format!("tape {} not loaded or empty", tape_num).red().to_string()],
         };
         if tape.entries.is_empty() {
-            return vec![format!("tape {} not loaded or empty", tape_num)];
+            return vec![format!("tape {} not loaded or empty", tape_num).red().to_string()];
         }
         let cur_pos = self.machine.current_tape_pos();
         let start = cur_pos.unwrap_or(tape.pos);
-        let mut items: Vec<(String, Option<String>)> = Vec::new();
+        let mut items: Vec<(String, usize, Option<String>)> = Vec::new();
         let mut comment_idx = tape.comments.partition_point(|(before, _)| *before < start);
         for (idx, entry) in tape.entries.iter().enumerate().skip(start).take(20) {
             while comment_idx < tape.comments.len() && tape.comments[comment_idx].0 == idx {
-                items.push((format!("      ; {}", tape.comments[comment_idx].1), None));
+                let text = format!("      ; {}", tape.comments[comment_idx].1);
+                items.push((text.dimmed().to_string(), 0, None));
                 comment_idx += 1;
             }
             let inline = tape.inline_comments.iter()
                 .find(|(i, _)| *i == idx)
                 .map(|(_, c)| c.clone());
-            let marker = if cur_pos == Some(idx) { ">" } else { " " };
-            items.push((format!("{} {:4}: {}", marker, idx + 1, entry), inline));
+            let at_cur = cur_pos == Some(idx);
+            let base_plain = format!("{} {:4}: {}", if at_cur { ">" } else { " " }, idx + 1, entry);
+            let plain_len = base_plain.len();
+            let base = if use_color() {
+                let marker = if at_cur { "▶".bright_cyan().bold().to_string() } else { " ".to_string() };
+                format!("{} {}: {}", marker, format!("{:4}", idx + 1).dimmed(), entry)
+            } else {
+                base_plain
+            };
+            items.push((base, plain_len, inline));
         }
         align_inline_comments(items)
     }
@@ -249,7 +274,7 @@ impl Debugger {
         let tape_num = self.machine.active_tape_num().unwrap_or(1);
         let entries = self.machine.peek_tape_entries(tape_num, n * 4 + 10);
         let inline_comments = self.machine.tape_ref(tape_num).map(|t| t.inline_comments.as_slice()).unwrap_or(&[]);
-        let mut items: Vec<(String, Option<String>)> = Vec::new();
+        let mut items: Vec<(String, usize, Option<String>)> = Vec::new();
         let mut count = 0;
         for (idx, entry) in &entries {
             if count >= n {
@@ -259,7 +284,14 @@ impl Debugger {
                 let inline = inline_comments.iter()
                     .find(|(i, _)| i == idx)
                     .map(|(_, c)| c.clone());
-                items.push((format!("{:4}: {:05}  {}", idx + 1, o, disassemble(*o)), inline));
+                let base_plain = format!("{:4}: {:05}  {}", idx + 1, o, disassemble(*o));
+                let plain_len = base_plain.len();
+                let base = if use_color() {
+                    format!("{}: {:05}  {}", format!("{:4}", idx + 1).dimmed(), o, disassemble(*o))
+                } else {
+                    base_plain
+                };
+                items.push((base, plain_len, inline));
                 count += 1;
             }
         }
@@ -288,7 +320,7 @@ impl Debugger {
                     loaded
                 }
             }
-            Err(e) => vec![format!("error: {}", e)],
+            Err(e) => vec![format!("{} {}", "error:".red(), e)],
         }
     }
 
@@ -316,38 +348,38 @@ impl Debugger {
     fn cmd_exec(&mut self, order_str: &str) -> Vec<String> {
         let order: u32 = match order_str.trim().parse() {
             Ok(o) if o <= 99999 => o,
-            _ => return vec![format!("invalid order '{}' (must be 5-digit number 00000-99999)", order_str)],
+            _ => return vec![format!("invalid order '{}' (must be 5-digit number 00000-99999)", order_str).red().to_string()],
         };
         match self.machine.exec_single(order) {
             Ok(outs) => outs.into_iter().flat_map(format_output).collect(),
-            Err(e) => vec![format!("error: {}", e)],
+            Err(e) => vec![format!("{} {}", "error:".red(), e)],
         }
     }
 
     fn cmd_transfer(&mut self, tape_str: &str) -> Vec<String> {
         let n: u8 = match tape_str.parse() {
             Ok(n) if (1..=7).contains(&n) => n,
-            _ => return vec![format!("invalid tape number '{}' (must be 1-7)", tape_str)],
+            _ => return vec![format!("invalid tape number '{}' (must be 1-7)", tape_str).red().to_string()],
         };
         let order = 2 * 10000 + 1000 + n as u32; // 021rr
         match self.machine.exec_single(order) {
             Ok(_) => {
                 vec![format!("transferred to tape {}", n)]
             }
-            Err(e) => vec![format!("error: {}", e)],
+            Err(e) => vec![format!("{} {}", "error:".red(), e)],
         }
     }
 
     fn cmd_search(&mut self, block_str: &str, tape_num: Option<usize>) -> Vec<String> {
         let block: u8 = match block_str.parse::<u8>() {
             Ok(b) if b <= 9 => b,
-            _ => return vec![format!("invalid block '{}' (must be 0-9)", block_str)],
+            _ => return vec![format!("invalid block '{}' (must be 0-9)", block_str).red().to_string()],
         };
         let tape_num = tape_num.unwrap_or_else(|| self.machine.active_tape_num().unwrap_or(1));
         let order = 3 * 10000 + (block as u32) * 100 + tape_num as u32;
         match self.machine.exec_single(order) {
             Ok(_) => vec![format!("tape {} positioned at block {}", tape_num, block)],
-            Err(e) => vec![format!("error: {}", e)],
+            Err(e) => vec![format!("{} {}", "error:".red(), e)],
         }
     }
 
@@ -503,22 +535,24 @@ impl Debugger {
             return self.cmd_dump_tapes(show_dis);
         }
         let mut lines = Vec::new();
-        lines.push("     | 0            1            2            3            4            5            6            7            8            9".to_string());
-        lines.push("-----+".to_string() + &"-".repeat(130));
+        let pipe = if use_color() { "┃" } else { "|" };
+        let sep = if use_color() { "━".repeat(130) } else { "-".repeat(130) };
+        lines.push(format!("     {} 0            1            2            3            4            5            6            7            8            9", pipe).dimmed().to_string());
+        lines.push(format!("-----+{}", sep).dimmed().to_string());
         for row in 1..=9usize {
             let base = row * 10;
-            let vals: Vec<String> = (0..10).map(|col| format!("{}", self.machine.stores[base + col - 10])).collect();
-            lines.push(format!("{:3}  | {}", base, vals.join("  ")));
+            let vals: Vec<String> = (0..10).map(|col| color_num(self.machine.stores[base + col - 10])).collect();
+            lines.push(format!("{:3}  {} {}", base, pipe, vals.join("  ")));
         }
         lines.push(String::new());
-        lines.push(format!("acc    = {}", self.machine.acc));
-        lines.push(format!("sign   = {}", match self.machine.sign_flag {
+        lines.push(format!("{} {}", "acc    =".dimmed(), self.machine.acc));
+        lines.push(format!("{} {}", "sign   =".dimmed(), match self.machine.sign_flag {
             None => "(not set)".to_string(),
             Some(true) => "positive".to_string(),
             Some(false) => "negative".to_string(),
         }));
-        lines.push(format!("layout = {}", self.machine.layout.map(|n| n.to_string()).unwrap_or_else(|| "(none)".to_string())));
-        lines.push(format!("shift  = {}", match self.machine.shift {
+        lines.push(format!("{} {}", "layout =".dimmed(), self.machine.layout.map(|n| n.to_string()).unwrap_or_else(|| "(none)".to_string())));
+        lines.push(format!("{} {}", "shift  =".dimmed(), match self.machine.shift {
             None => "B (default)".to_string(),
             Some(n) => { let l = ['?','A','B','C','D','E','F','G','H','J']; format!("{} pending", l.get(n as usize).unwrap_or(&'?')) }
         }));
@@ -526,12 +560,14 @@ impl Debugger {
             IP::Tape { reader, pos } => format!("tape {} pos {}", reader + 1, pos + 1),
             IP::Store(addr) => format!("store {}", addr),
         };
-        lines.push(format!("ip     = {}", ip_str));
-        lines.push(format!("halted = {}", if self.machine.halted {
-            self.machine.halt_reason.as_ref().map(|r| r.to_string()).unwrap_or_else(|| "yes".to_string())
+        lines.push(format!("{} {}", "ip     =".dimmed(), ip_str));
+        let halted_val = if self.machine.halted {
+            let s = self.machine.halt_reason.as_ref().map(|r| r.to_string()).unwrap_or_else(|| "yes".to_string());
+            s.red().to_string()
         } else {
             "no".to_string()
-        }));
+        };
+        lines.push(format!("{} {}", "halted =".dimmed(), halted_val));
         lines
     }
 
@@ -550,32 +586,44 @@ impl Debugger {
             } else {
                 None
             };
-            lines.push(format!("=== tape {} ({} entries) ===", tape_num, tape.entries.len()));
-            let mut items: Vec<(String, Option<String>)> = Vec::new();
+            lines.push(format!("=== tape {} ({} entries) ===", tape_num, tape.entries.len()).bold().to_string());
+            let mut items: Vec<(String, usize, Option<String>)> = Vec::new();
             let mut comment_idx = 0usize;
             for (idx, entry) in tape.entries.iter().enumerate() {
                 while comment_idx < tape.comments.len() && tape.comments[comment_idx].0 == idx {
-                    items.push((format!("      ; {}", tape.comments[comment_idx].1), None));
+                    let text = format!("      ; {}", tape.comments[comment_idx].1);
+                    items.push((text.dimmed().to_string(), 0, None));
                     comment_idx += 1;
                 }
                 let inline = tape.inline_comments.iter()
                     .find(|(i, _)| *i == idx)
                     .map(|(_, c)| c.clone());
-                let marker = if cur_pos == Some(idx) { ">" } else { " " };
-                let base = format!("{} {:4}: {}", marker, idx + 1, entry);
+                let at_cur = cur_pos == Some(idx);
+                let base_plain = format!("{} {:4}: {}", if at_cur { ">" } else { " " }, idx + 1, entry);
+                let plain_len = base_plain.len();
+                let base = if use_color() {
+                    let marker = if at_cur { "▶".bright_cyan().bold().to_string() } else { " ".to_string() };
+                    format!("{} {}: {}", marker, format!("{:4}", idx + 1).dimmed(), entry)
+                } else {
+                    base_plain
+                };
                 if show_dis {
                     if let TapeEntry::Order(o) = entry {
-                        items.push((format!("{}  {}", base, disassemble(*o)), inline));
+                        let with_dis_plain = format!("{}  {}", if at_cur { format!("> {:4}: {}", idx + 1, entry) } else { format!("  {:4}: {}", idx + 1, entry) }, disassemble(*o));
+                        let plain_len_dis = with_dis_plain.len();
+                        let base_dis = format!("{}  {}", base, disassemble(*o));
+                        items.push((base_dis, plain_len_dis, inline));
                     } else {
-                        items.push((base, inline));
+                        items.push((base, plain_len, inline));
                     }
                 } else {
-                    items.push((base, inline));
+                    items.push((base, plain_len, inline));
                 }
             }
             // trailing comments after all entries
             while comment_idx < tape.comments.len() {
-                items.push((format!("      ; {}", tape.comments[comment_idx].1), None));
+                let text = format!("      ; {}", tape.comments[comment_idx].1);
+                items.push((text.dimmed().to_string(), 0, None));
                 comment_idx += 1;
             }
             lines.extend(align_inline_comments(items));
@@ -652,7 +700,7 @@ impl Debugger {
                 let cond_met = bp.conditions.is_empty()
                     || bp.conditions.iter().all(|c| eval_condition(c, &self.machine));
                 if cond_met {
-                    return Some(format!("breakpoint {} hit at tape {} line {}", bp.id, tape_num, pos + 1));
+                    return Some(format!("breakpoint {} hit at tape {} line {}", bp.id, tape_num, pos + 1).bold().yellow().to_string());
                 }
             }
         }
@@ -700,21 +748,26 @@ fn parse_location(s: &str) -> Result<Location, String> {
 }
 
 fn format_output(o: Output) -> Vec<String> {
+    let pipe = if use_color() { "│" } else { "|" };
     match o {
-        Output::Print(dst, s) => vec![format!("{:02}| {}", dst, s)],
-        Output::Perforate(dst, s) => vec![format!("{:02}| {}", dst, s)],
+        Output::Print(dst, s) => vec![format!("{}{} ", format!("{:02}", dst).dimmed(), pipe.dimmed()) + &s],
+        Output::Perforate(dst, s) => vec![format!("{}{} ", format!("{:02}", dst).dimmed(), pipe.dimmed()) + &s],
     }
 }
 
-fn align_inline_comments(items: Vec<(String, Option<String>)>) -> Vec<String> {
+// plain_len = display width of base (no ANSI bytes) for correct column alignment
+fn align_inline_comments(items: Vec<(String, usize, Option<String>)>) -> Vec<String> {
     let col = items.iter()
-        .filter(|(_, c)| c.is_some())
-        .map(|(base, _)| base.len())
+        .filter(|(_, _, c)| c.is_some())
+        .map(|(_, plain_len, _)| plain_len + 4)
         .max()
-        .map(|m| m + 4)
         .unwrap_or(0);
-    items.into_iter().map(|(base, comment)| match comment {
+    items.into_iter().map(|(base, plain_len, comment)| match comment {
         None => base,
-        Some(c) => format!("{:<col$}; {}", base, c, col = col),
+        Some(c) => {
+            let pad = col.saturating_sub(plain_len);
+            let comment_str = format!("; {}", c).dimmed().to_string();
+            format!("{}{:pad$}{}", base, "", comment_str, pad = pad)
+        }
     }).collect()
 }

@@ -3,6 +3,7 @@ mod disasm;
 mod machine;
 mod tape;
 
+use colored::Colorize;
 use debugger::Debugger;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -16,12 +17,20 @@ fn main() {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("wdb {} — WITCH computer debugger", env!("CARGO_PKG_VERSION"));
-        println!("Usage: wdb [--batch] [tape-file]");
+        println!("Usage: wdb [--batch] [--color|--no-color] [tape-file]");
         println!("  --version, -V  Print version");
         println!("  --help, -h     Print this help");
         println!("  --batch        Run tape non-interactively and exit");
+        println!("  --color        Force color output");
+        println!("  --no-color     Disable color output");
         println!("Once running, type 'help' for debugger commands.");
         return;
+    }
+
+    if args.iter().any(|a| a == "--color") {
+        colored::control::set_override(true);
+    } else if args.iter().any(|a| a == "--no-color") {
+        colored::control::set_override(false);
     }
 
     let batch = args.iter().any(|a| a == "--batch");
@@ -67,7 +76,7 @@ fn main() {
         }
     }
 
-    println!("WITCH Debugger (type 'help' for commands)");
+    println!("{}", "WITCH Debugger (type 'help' for commands)".bold());
 
     let mut rl = DefaultEditor::new().expect("failed to create readline editor");
 
