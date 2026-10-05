@@ -156,6 +156,7 @@ impl Debugger {
             match self.machine.step() {
                 Ok(outs) => output.extend(outs.into_iter().flat_map(format_output)),
                 Err(reason) => {
+                    output.extend(self.machine.take_incomplete_line().into_iter().flat_map(format_output));
                     output.push(format!("halted: {}", reason));
                     break;
                 }
@@ -172,6 +173,7 @@ impl Debugger {
         match self.machine.step() {
             Ok(outs) => out.extend(outs.into_iter().flat_map(format_output)),
             Err(reason) => {
+                out.extend(self.machine.take_incomplete_line().into_iter().flat_map(format_output));
                 out.push(format!("halted: {}", reason));
                 return out;
             }
@@ -669,7 +671,7 @@ fn parse_location(s: &str) -> Result<Location, String> {
 
 fn format_output(o: Output) -> Vec<String> {
     match o {
-        Output::Print(s) => vec![s],
-        Output::Perforate(s) => vec![format!("[punch] {}", s)],
+        Output::Print(dst, s) => vec![format!("{:02}| {}", dst, s)],
+        Output::Perforate(dst, s) => vec![format!("{:02}| {}", dst, s)],
     }
 }

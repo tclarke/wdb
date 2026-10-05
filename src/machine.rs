@@ -66,8 +66,8 @@ pub enum IP {
 /// Output event from an order.
 #[derive(Clone, Debug)]
 pub enum Output {
-    Print(String),
-    Perforate(String),
+    Print(u8, String),
+    Perforate(u8, String),
 }
 
 pub struct Machine {
@@ -83,6 +83,9 @@ pub struct Machine {
     pub halt_reason: Option<HaltReason>,
     /// column counter for multi-column print layouts
     pub col: usize,
+    /// buffered column values for multi-column layouts (flushed on terminal layout)
+    pub line_buf: Vec<String>,
+    pub line_buf_dst: u8,
 }
 
 impl Machine {
@@ -98,6 +101,8 @@ impl Machine {
             halted: false,
             halt_reason: None,
             col: 0,
+            line_buf: Vec::new(),
+            line_buf_dst: 0,
         }
     }
 
@@ -111,6 +116,8 @@ impl Machine {
         self.halted = false;
         self.halt_reason = None;
         self.col = 0;
+        self.line_buf.clear();
+        self.line_buf_dst = 0;
         // startup: find block marker 1 on tape 1
         let pos = if let Some(tape) = &self.tapes[0] {
             tape.entries.iter().position(|e| matches!(e, TapeEntry::Block(1))).unwrap_or(0)
@@ -608,14 +615,7 @@ impl Machine {
     fn write_addr(&mut self, addr: u8, val: WitchNum) -> Result<Vec<Output>, HaltReason> {
         match addr {
             0 => Ok(Vec::new()),
-            1 | 3 => {
-                let s = self.format_output(val)?;
-                Ok(vec![Output::Print(s)])
-            }
-            2 | 4 => {
-                let s = self.format_output(val)?;
-                Ok(vec![Output::Perforate(s)])
-            }
+            1 | 3 | 2 | 4 => self.write_output(addr, val),
             5..=7 => Ok(Vec::new()),
             8 => {
                 let low7 = val.magnitude % 10_000_000;
@@ -651,10 +651,74 @@ impl Machine {
         Ok(())
     }
 
-    fn format_output(&mut self, val: WitchNum) -> Result<String, HaltReason> {
+    fn make_output(addr: u8, s: String) -> Output {
+        if addr == 1 || addr == 3 {
+            Output::Print(addr, s)
+        } else {
+            Output::Perforate(addr, s)
+        }
+    }
+
+    fn write_output(&mut self, addr: u8, val: WitchNum) -> Result<Vec<Output>, HaltReason> {
         let layout = self.layout.ok_or(HaltReason::NoLayout)?;
-        let s = format_for_layout(val, layout, &mut self.col);
-        Ok(s)
+        let num = format_number(val, layout);
+        match layout {
+            0 => {
+                let mut out = self.flush_line_buf_incomplete();
+                self.col = 0;
+                out.push(Self::make_output(addr, "\n\n\n\n\n".to_string()));
+                Ok(out)
+            }
+            1 | 2 => {
+                let mut out = self.flush_line_buf_incomplete();
+                out.push(Self::make_output(addr, num));
+                Ok(out)
+            }
+            3 | 6 | 7 => {
+                // intermediate column — buffer
+                self.line_buf.push(num);
+                self.line_buf_dst = addr;
+                self.col += 1;
+                Ok(vec![])
+            }
+            4 | 8 => {
+                let s = self.flush_line_buf_terminal(num, "\n");
+                self.col = 0;
+                Ok(vec![Self::make_output(addr, s)])
+            }
+            5 | 9 => {
+                let s = self.flush_line_buf_terminal(num, "\n\n");
+                self.col = 0;
+                Ok(vec![Self::make_output(addr, s)])
+            }
+            _ => Ok(vec![Self::make_output(addr, num)]),
+        }
+    }
+
+    fn flush_line_buf_terminal(&mut self, last: String, newlines: &str) -> String {
+        if self.line_buf.is_empty() {
+            return last + newlines;
+        }
+        let mut parts = std::mem::take(&mut self.line_buf);
+        self.line_buf_dst = 0;
+        parts.push(last);
+        parts.join("\t") + newlines
+    }
+
+    fn flush_line_buf_incomplete(&mut self) -> Vec<Output> {
+        if self.line_buf.is_empty() {
+            return vec![];
+        }
+        let dst = self.line_buf_dst;
+        let s = self.line_buf.drain(..).collect::<Vec<_>>().join("\t") + " [incomplete]\n";
+        self.line_buf_dst = 0;
+        self.col = 0;
+        vec![Self::make_output(dst, s)]
+    }
+
+    /// If a multi-column line was in progress when the machine halted, return it.
+    pub fn take_incomplete_line(&mut self) -> Option<Output> {
+        self.flush_line_buf_incomplete().into_iter().next()
     }
 
     // ---- Query helpers for debugger ----
@@ -749,60 +813,20 @@ fn random_roundoff() -> WitchNum {
     WitchNum::new(bit, false)
 }
 
-fn format_for_layout(val: WitchNum, layout: u8, col: &mut usize) -> String {
+fn format_number(val: WitchNum, layout: u8) -> String {
     let sign = if val.negative { '-' } else { '+' };
     let m = val.magnitude;
     let first = m / 10_000_000;
     let rest = m % 10_000_000;
-
     match layout {
-        0 => {
-            *col = 0;
-            "\n\n\n\n\n".to_string()
-        }
         1 => format!("{}{}{:07}", sign, first, rest),
         2 => format!("*{:05}", m / 1_000),
-        3 => {
-            // 8 digits, 5 columns per line, first or intermediate
-            let s = format!("{}{}.{:07}", sign, first, rest);
-            *col += 1;
-            s
-        }
-        4 => {
-            // 8 digits, last on line
-            let s = format!("{}{}.{:07}\n", sign, first, rest);
-            *col = 0;
-            s
-        }
-        5 => {
-            let s = format!("{}{}.{:07}\n\n", sign, first, rest);
-            *col = 0;
-            s
-        }
-        6 | 7 => {
-            // 6 digits
+        3..=5 => format!("{}{}.{:07}", sign, first, rest),
+        6..=9 => {
             let six = m / 100;
             let f6 = six / 100_000;
             let r5 = six % 100_000;
-            let s = format!("{}{}.{:05}", sign, f6, r5);
-            *col += 1;
-            s
-        }
-        8 => {
-            let six = m / 100;
-            let f6 = six / 100_000;
-            let r5 = six % 100_000;
-            let s = format!("{}{}.{:05}\n", sign, f6, r5);
-            *col = 0;
-            s
-        }
-        9 => {
-            let six = m / 100;
-            let f6 = six / 100_000;
-            let r5 = six % 100_000;
-            let s = format!("{}{}.{:05}\n\n", sign, f6, r5);
-            *col = 0;
-            s
+            format!("{}{}.{:05}", sign, f6, r5)
         }
         _ => format!("{}", val),
     }
