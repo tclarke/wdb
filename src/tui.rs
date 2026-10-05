@@ -53,9 +53,12 @@ struct App {
     tape_scroll: [usize; 7],
     state_scroll: usize,
     dis_scroll: usize,
-    dis_cursor: usize, // entry index of selected order in dis pane
+    dis_cursor: usize,
     log_scroll: usize,
+    tape_visible: [bool; 7],
     show_dis: bool,
+    show_state: bool,
+    show_output: bool,
     running: bool,
     log: VecDeque<String>,
     // edit mode
@@ -65,6 +68,9 @@ struct App {
     // cli drop mode
     cli_mode: bool,
     cli_buf: String,
+    // load prompt: Some(Some(tape_idx)) = load into tape, Some(None) = load all
+    load_prompt: Option<Option<usize>>,
+    load_prompt_buf: String,
 }
 
 impl App {
@@ -79,6 +85,8 @@ impl App {
             dis_cursor: 0,
             log_scroll: 0,
             show_dis: true,
+            show_state: true,
+            show_output: true,
             running: false,
             log: VecDeque::with_capacity(LOG_CAP),
             edit: None,
@@ -86,6 +94,9 @@ impl App {
             edit_err: EditError::None,
             cli_mode: false,
             cli_buf: String::new(),
+            tape_visible: [false; 7],
+            load_prompt: None,
+            load_prompt_buf: String::new(),
         }
     }
 
@@ -145,30 +156,20 @@ impl App {
         }
     }
 
-    fn loaded_tapes(&self) -> Vec<usize> {
-        (0..7).filter(|&i| self.debugger.machine.tapes[i].is_some()).collect()
+    fn visible_tapes(&self) -> Vec<usize> {
+        (0..7).filter(|&i| self.tape_visible[i]).collect()
     }
 
     fn cycle_focus(&mut self) {
-        let loaded = self.loaded_tapes();
-        self.focus = match self.focus {
-            Focus::Tape(i) => {
-                if let Some(pos) = loaded.iter().position(|&t| t == i) {
-                    if pos + 1 < loaded.len() {
-                        Focus::Tape(loaded[pos + 1])
-                    } else {
-                        Focus::State
-                    }
-                } else {
-                    Focus::State
-                }
-            }
-            Focus::State => Focus::Dis,
-            Focus::Dis => Focus::Log,
-            Focus::Log => {
-                if let Some(&first) = loaded.first() { Focus::Tape(first) } else { Focus::State }
-            }
-        };
+        let visible = self.visible_tapes();
+        // build ordered pane list based on what's shown
+        let mut panes: Vec<Focus> = visible.iter().map(|&i| Focus::Tape(i)).collect();
+        if self.show_state { panes.push(Focus::State); }
+        if self.show_dis   { panes.push(Focus::Dis); }
+        if self.show_output { panes.push(Focus::Log); }
+        if panes.is_empty() { return; }
+        let cur_pos = panes.iter().position(|p| p == &self.focus).unwrap_or(0);
+        self.focus = panes[(cur_pos + 1) % panes.len()].clone();
     }
 
     fn scroll_up(&mut self) {
@@ -409,6 +410,9 @@ impl App {
     }
 
     fn handle_event(&mut self, ev: Event) -> bool {
+        if self.load_prompt.is_some() {
+            return self.handle_load_prompt_event(ev);
+        }
         if self.cli_mode {
             return self.handle_cli_event(ev);
         }
@@ -489,6 +493,97 @@ impl App {
             }
             KeyCode::Char('b') => self.toggle_bp(),
             KeyCode::Char('`') => self.cli_mode = true,
+            // show/hide panes
+            KeyCode::Char(c @ '1'..='7') => {
+                let idx = c as usize - '1' as usize;
+                self.tape_visible[idx] = !self.tape_visible[idx];
+                if !self.tape_visible[idx] && self.focus == Focus::Tape(idx) {
+                    self.cycle_focus();
+                }
+            }
+            KeyCode::Char('S') => {
+                self.show_state = !self.show_state;
+                if !self.show_state && self.focus == Focus::State {
+                    self.cycle_focus();
+                }
+            }
+            KeyCode::Char('O') => {
+                self.show_output = !self.show_output;
+                if !self.show_output && self.focus == Focus::Log {
+                    self.cycle_focus();
+                }
+            }
+            // load tape(s)
+            KeyCode::Char('l') => {
+                let tape_idx = match self.focus {
+                    Focus::Tape(i) => i,
+                    _ => self.visible_tapes().first().copied().unwrap_or(0),
+                };
+                self.load_prompt = Some(Some(tape_idx));
+                self.load_prompt_buf.clear();
+            }
+            KeyCode::Char('L') => {
+                self.load_prompt = Some(None);
+                self.load_prompt_buf.clear();
+            }
+            // unload tape(s)
+            KeyCode::Char('u') => {
+                if let Focus::Tape(tape_idx) = self.focus {
+                    self.debugger.machine.tapes[tape_idx] = None;
+                    self.tape_visible[tape_idx] = false;
+                    self.push_log(format!("tape {} unloaded", tape_idx + 1));
+                    self.cycle_focus();
+                }
+            }
+            KeyCode::Char('U') => {
+                for i in 0..7 {
+                    self.debugger.machine.tapes[i] = None;
+                    self.tape_visible[i] = false;
+                }
+                self.push_log("all tapes unloaded");
+                if let Focus::Tape(_) = self.focus { self.focus = Focus::State; }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_load_prompt_event(&mut self, ev: Event) -> bool {
+        let Event::Key(kev) = ev else { return false; };
+        match kev.code {
+            KeyCode::Esc => {
+                self.load_prompt = None;
+                self.load_prompt_buf.clear();
+            }
+            KeyCode::Backspace => { self.load_prompt_buf.pop(); }
+            KeyCode::Enter => {
+                let path = self.load_prompt_buf.trim().to_string();
+                let target = self.load_prompt.take();
+                self.load_prompt_buf.clear();
+                if !path.is_empty() {
+                    match target {
+                        Some(Some(tape_idx)) => {
+                            let tape_num = tape_idx + 1;
+                            let outs = self.debugger.execute(&format!("load {} {}", path, tape_num));
+                            for l in outs { self.push_log(l); }
+                            if self.debugger.machine.tapes[tape_idx].is_some() {
+                                self.tape_visible[tape_idx] = true;
+                            }
+                        }
+                        Some(None) => {
+                            let outs = self.debugger.execute(&format!("load {}", path));
+                            for l in outs { self.push_log(l); }
+                            for i in 0..7 {
+                                if self.debugger.machine.tapes[i].is_some() {
+                                    self.tape_visible[i] = true;
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            KeyCode::Char(c) => self.load_prompt_buf.push(c),
             _ => {}
         }
         false
@@ -651,7 +746,6 @@ fn bp_marker_char(bp_id: Option<usize>, bp_enabled: Option<bool>) -> (&'static s
 fn render(f: &mut ratatui::Frame, app: &mut App) {
     let area = f.area();
 
-    // Main vertical split: tapes+mid+log | status bar
     let vchunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(1)])
@@ -659,58 +753,70 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     let main_area = vchunks[0];
     let status_area = vchunks[1];
 
-    // Main area: tapes on top, middle row, log below
-    let loaded = (0..7usize).filter(|&i| app.debugger.machine.tapes[i].is_some()).collect::<Vec<_>>();
-    let n_tape_cols = loaded.len().min(4).max(1);
-    let tape_height = (main_area.height as usize * 35 / 100).max(3) as u16;
-    let mid_height = (main_area.height as usize * 40 / 100).max(3) as u16;
-    // log gets remainder
-    let log_height = main_area.height.saturating_sub(tape_height + mid_height).max(3);
+    let visible = app.visible_tapes();
+    let show_tapes = !visible.is_empty();
+    let show_mid = app.show_state || app.show_dis;
+    let show_log = app.show_output;
+
+    // Build dynamic vertical constraints
+    let mut v_constraints: Vec<Constraint> = Vec::new();
+    let mut row_tape: Option<usize> = None;
+    let mut row_mid: Option<usize> = None;
+    let mut row_log: Option<usize> = None;
+    if show_tapes { row_tape = Some(v_constraints.len()); v_constraints.push(Constraint::Percentage(35)); }
+    if show_mid   { row_mid  = Some(v_constraints.len()); v_constraints.push(Constraint::Percentage(40)); }
+    if show_log   { row_log  = Some(v_constraints.len()); v_constraints.push(Constraint::Min(3)); }
+
+    if v_constraints.is_empty() {
+        render_status(f, app, status_area);
+        return;
+    }
+    // Last row fills remaining space
+    if let Some(last) = v_constraints.last_mut() { *last = Constraint::Min(3); }
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(tape_height),
-            Constraint::Length(mid_height),
-            Constraint::Min(log_height),
-        ])
+        .constraints(v_constraints)
         .split(main_area);
 
-    // Tape row: N columns for loaded tapes
-    let tape_constraints: Vec<Constraint> = (0..n_tape_cols)
-        .map(|_| Constraint::Ratio(1, n_tape_cols as u32))
-        .collect();
-    let tape_cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(tape_constraints)
-        .split(rows[0]);
-
-    for (col, &tape_idx) in loaded.iter().take(n_tape_cols).enumerate() {
-        render_tape_panel(f, app, tape_cols[col], tape_idx, rows[0].height as usize - 2);
+    // Tape row
+    if let Some(ri) = row_tape {
+        let n_cols = visible.len().min(4).max(1);
+        let tape_constraints: Vec<Constraint> = (0..n_cols)
+            .map(|_| Constraint::Ratio(1, n_cols as u32))
+            .collect();
+        let tape_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(tape_constraints)
+            .split(rows[ri]);
+        for (col, &tape_idx) in visible.iter().take(n_cols).enumerate() {
+            render_tape_panel(f, app, tape_cols[col], tape_idx, rows[ri].height as usize - 2);
+        }
     }
 
-    // Mid row: state + optional dis
-    if app.show_dis {
-        let mid_cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-            .split(rows[1]);
-        render_state(f, app, mid_cols[0]);
-        render_dis(f, app, mid_cols[1]);
-    } else {
-        render_state(f, app, rows[1]);
+    // Mid row: state and/or dis
+    if let Some(ri) = row_mid {
+        match (app.show_state, app.show_dis) {
+            (true, true) => {
+                let mid_cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+                    .split(rows[ri]);
+                render_state(f, app, mid_cols[0]);
+                render_dis(f, app, mid_cols[1]);
+            }
+            (true, false) => render_state(f, app, rows[ri]),
+            (false, true) => render_dis(f, app, rows[ri]),
+            (false, false) => {}
+        }
     }
 
     // Log
-    render_log(f, app, rows[2]);
+    if let Some(ri) = row_log { render_log(f, app, rows[ri]); }
 
-    // Status bar
     render_status(f, app, status_area);
 
-    // Edit overlay
-    if app.edit.is_some() {
-        render_edit_popup(f, app, area);
-    }
+    if app.edit.is_some() { render_edit_popup(f, app, area); }
 }
 
 fn render_tape_panel(f: &mut ratatui::Frame, app: &App, area: Rect, tape_idx: usize, visible_height: usize) {
@@ -725,6 +831,8 @@ fn render_tape_panel(f: &mut ratatui::Frame, app: &App, area: Rect, tape_idx: us
 
     let border_style = if focused {
         Style::default().fg(Color::Cyan)
+    } else if active_tape == Some(tape_num) {
+        Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -1016,20 +1124,21 @@ fn render_log(f: &mut ratatui::Frame, app: &App, area: Rect) {
 }
 
 fn render_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let text = if app.cli_mode {
-        format!("(witch) {}_", app.cli_buf)
+    let (text, style) = if let Some(ref target) = app.load_prompt {
+        let label = match target {
+            Some(i) => format!("Load file into tape {}: {}_", i + 1, app.load_prompt_buf),
+            None => format!("Load all tapes from file: {}_", app.load_prompt_buf),
+        };
+        (label, Style::default().fg(Color::Yellow))
+    } else if app.cli_mode {
+        (format!("(witch) {}_", app.cli_buf), Style::default().fg(Color::Yellow))
     } else if app.running {
-        " [Space]halt  [n]step  [b]bp  [D]dis  [Tab]focus  [R]reset  [q]quit  RUNNING".into()
+        (" [Space]halt  [n]step  [b]bp  [D]dis  [Tab]focus  [R]reset  [q]quit  RUNNING".into(),
+         Style::default().fg(Color::Green))
     } else {
         let halted_marker = if app.debugger.machine.halted { " [HALTED]" } else { "" };
-        format!(" [Space]run  [n]step  [b]bp  [D]dis  [Tab]focus  [R]reset  [`]cli  [q]quit{}", halted_marker)
-    };
-    let style = if app.cli_mode {
-        Style::default().fg(Color::Yellow)
-    } else if app.running {
-        Style::default().fg(Color::Green)
-    } else {
-        Style::default().fg(Color::DarkGray)
+        (format!(" [Space]run  [n]step  [b]bp  [D]dis  [S]state  [O]output  [1-7]tape  [`]cli  [q]quit{}", halted_marker),
+         Style::default().fg(Color::DarkGray))
     };
     f.render_widget(Paragraph::new(text).style(style), area);
 }
@@ -1101,6 +1210,10 @@ pub fn run_tui(debugger: Debugger) -> Result<(), Box<dyn Error>> {
     let mut terminal = setup_terminal()?;
     let mut app = App::new(debugger);
 
+    // tape_visible defaults to loaded state
+    for i in 0..7 {
+        app.tape_visible[i] = app.debugger.machine.tapes[i].is_some();
+    }
     // Focus first loaded tape if any, else State
     let first_tape = (0..7).find(|&i| app.debugger.machine.tapes[i].is_some());
     app.focus = first_tape.map(Focus::Tape).unwrap_or(Focus::State);
