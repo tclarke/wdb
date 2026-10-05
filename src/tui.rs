@@ -53,6 +53,7 @@ struct App {
     tape_scroll: [usize; 7],
     state_scroll: usize,
     dis_scroll: usize,
+    dis_cursor: usize, // entry index of selected order in dis pane
     log_scroll: usize,
     show_dis: bool,
     running: bool,
@@ -75,6 +76,7 @@ impl App {
             tape_scroll: [0; 7],
             state_scroll: 0,
             dis_scroll: 0,
+            dis_cursor: 0,
             log_scroll: 0,
             show_dis: true,
             running: false,
@@ -134,6 +136,13 @@ impl App {
                 self.push_log(l);
             }
         }
+        // sync dis_cursor to new IP if dis pane is not being manually navigated
+        if let Some(pos) = self.debugger.machine.current_tape_pos() {
+            self.dis_cursor = pos;
+            if pos < self.dis_scroll {
+                self.dis_scroll = pos;
+            }
+        }
     }
 
     fn loaded_tapes(&self) -> Vec<usize> {
@@ -173,7 +182,7 @@ impl App {
                 }
             }
             Focus::State => self.state_scroll = self.state_scroll.saturating_sub(1),
-            Focus::Dis => self.dis_scroll = self.dis_scroll.saturating_sub(1),
+            Focus::Dis => self.move_dis_cursor(-1),
             Focus::Log => {
                 let max = self.log.len().saturating_sub(1);
                 self.log_scroll = (self.log_scroll + 1).min(max);
@@ -190,12 +199,42 @@ impl App {
                 }
             }
             Focus::State => self.state_scroll += 1,
-            Focus::Dis => self.dis_scroll += 1,
+            Focus::Dis => self.move_dis_cursor(1),
             Focus::Log => {
                 if self.log_scroll > 0 {
                     self.log_scroll -= 1;
                 }
             }
+        }
+    }
+
+    fn move_dis_cursor(&mut self, delta: i32) {
+        let tape_num = match self.debugger.machine.active_tape_num() {
+            Some(n) => n,
+            None => return,
+        };
+        let tape = match self.debugger.machine.tape_ref(tape_num) {
+            Some(t) => t,
+            None => return,
+        };
+        let order_indices: Vec<usize> = tape.entries.iter().enumerate()
+            .filter_map(|(i, e)| if matches!(e, TapeEntry::Order(_)) { Some(i) } else { None })
+            .collect();
+        if order_indices.is_empty() { return; }
+        let cur = self.dis_cursor;
+        // find position of cursor in order_indices (nearest match)
+        let pos = order_indices.partition_point(|&i| i < cur);
+        let pos = pos.min(order_indices.len() - 1);
+        let new_pos = if delta < 0 {
+            pos.saturating_sub(1)
+        } else {
+            (pos + 1).min(order_indices.len() - 1)
+        };
+        self.dis_cursor = order_indices[new_pos];
+        // dis_scroll is the entry index to start rendering from; adjust to keep cursor visible
+        // (height unknown here — just ensure scroll <= cursor)
+        if self.dis_cursor < self.dis_scroll {
+            self.dis_scroll = self.dis_cursor;
         }
     }
 
@@ -226,11 +265,7 @@ impl App {
                     Some(n) => n,
                     None => return,
                 };
-                let pos = match self.debugger.machine.current_tape_pos() {
-                    Some(p) => p,
-                    None => return,
-                };
-                (tape_num, pos + 1)
+                (tape_num, self.dis_cursor + 1)
             }
             _ => return,
         };
@@ -876,33 +911,53 @@ fn render_dis(f: &mut ratatui::Frame, app: &App, area: Rect) {
         }
     };
     let cur_pos = m.current_tape_pos().unwrap_or(tape.pos);
-    let start = cur_pos.saturating_sub(app.dis_scroll);
     let max_lines = inner.height as usize;
     let bps = app.debugger.breakpoints();
 
+    // collect all order display rows to compute auto-scroll
+    let order_entries: Vec<usize> = tape.entries.iter().enumerate()
+        .filter_map(|(i, e)| if matches!(e, TapeEntry::Order(_)) { Some(i) } else { None })
+        .collect();
+
+    // find which order-row index the dis_cursor is at
+    let cursor_order_row = order_entries.iter().position(|&i| i == app.dis_cursor)
+        .or_else(|| order_entries.iter().position(|&i| i >= app.dis_cursor))
+        .unwrap_or(0);
+
+    // find which order-row index dis_scroll starts at
+    let scroll_order_row = order_entries.iter().position(|&i| i >= app.dis_scroll).unwrap_or(0);
+
+    // auto-scroll: if cursor is below viewport bottom, adjust scroll
+    let scroll_order_row = if cursor_order_row >= scroll_order_row + max_lines {
+        cursor_order_row + 1 - max_lines
+    } else {
+        scroll_order_row
+    };
+    let start_entry = order_entries.get(scroll_order_row).copied().unwrap_or(0);
+
     let mut lines: Vec<Line> = Vec::new();
     let mut count = 0;
-    for (idx, entry) in tape.entries.iter().enumerate().skip(start) {
+    for (idx, entry) in tape.entries.iter().enumerate().skip(start_entry) {
         if count >= max_lines { break; }
-        // inline comment for this entry
         let inline = tape.inline_comments.iter()
             .find(|(i, _)| *i == idx)
             .map(|(_, c)| c.clone());
-        let at_cur = Some(idx) == Some(cur_pos);
+        let at_ip = idx == cur_pos;
+        let at_cursor = focused && idx == app.dis_cursor;
         if let TapeEntry::Order(o) = entry {
             let bp = bps.iter().find(|b| {
                 b.tape == tape_num && matches!(b.kind, BpKind::Line(n) if n == idx + 1)
             });
             let (bp_char, bp_style) = bp_marker_char(bp.map(|b| b.id), bp.map(|b| b.enabled));
-            let cur_char = if at_cur { "▶" } else { " " };
-            let cur_style = if at_cur {
+            let ip_char = if at_ip { "▶" } else { " " };
+            let ip_style = if at_ip {
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
             let mut spans = vec![
                 Span::styled(bp_char, bp_style),
-                Span::styled(cur_char, cur_style),
+                Span::styled(ip_char, ip_style),
                 Span::styled(format!("{:4}: {:05}  ", idx + 1, o), Style::default().fg(Color::DarkGray)),
                 Span::raw(disassemble(*o)),
             ];
@@ -912,7 +967,12 @@ fn render_dis(f: &mut ratatui::Frame, app: &App, area: Rect) {
                     Style::default().fg(Color::DarkGray),
                 ));
             }
-            lines.push(Line::from(spans));
+            let line = Line::from(spans);
+            if at_cursor {
+                lines.push(line.style(Style::default().add_modifier(Modifier::REVERSED)));
+            } else {
+                lines.push(line);
+            }
             count += 1;
         }
     }
@@ -1044,6 +1104,10 @@ pub fn run_tui(debugger: Debugger) -> Result<(), Box<dyn Error>> {
     // Focus first loaded tape if any, else State
     let first_tape = (0..7).find(|&i| app.debugger.machine.tapes[i].is_some());
     app.focus = first_tape.map(Focus::Tape).unwrap_or(Focus::State);
+    // Init dis_cursor to current IP
+    if let Some(pos) = app.debugger.machine.current_tape_pos() {
+        app.dis_cursor = pos;
+    }
 
     let result = event_loop(&mut terminal, &mut app);
     restore_terminal(terminal)?;
@@ -1081,21 +1145,23 @@ fn event_loop(
 }
 
 fn sync_tape_cursors(app: &mut App) {
-    // Keep tape cursor near the machine IP position
     let active_tape = app.debugger.machine.active_tape_num();
     let ip_pos = app.debugger.machine.current_tape_pos();
     if let (Some(tape_num), Some(pos)) = (active_tape, ip_pos) {
         let tape_idx = tape_num - 1;
         if tape_idx < 7 {
-            // compute display row for this entry index
             if let Some(tape) = app.debugger.machine.tapes[tape_idx].as_ref() {
                 let comment_count_before = tape.comments.iter()
                     .filter(|(before, _)| *before <= pos)
                     .count();
                 let display_row = pos + comment_count_before;
-                // only auto-scroll when running, don't override manual cursor
                 if app.running {
                     app.tape_cursor[tape_idx] = display_row;
+                    // also follow IP in dis pane when running
+                    app.dis_cursor = pos;
+                    if pos < app.dis_scroll {
+                        app.dis_scroll = pos;
+                    }
                 }
             }
         }
