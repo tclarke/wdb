@@ -52,7 +52,9 @@ struct App {
     tape_cursor: [usize; 7],
     tape_scroll: [usize; 7],
     state_scroll: usize,
+    state_hscroll: usize,
     dis_scroll: usize,
+    dis_hscroll: usize,
     dis_cursor: usize,
     log_scroll: usize,
     tape_visible: [bool; 7],
@@ -81,7 +83,9 @@ impl App {
             tape_cursor: [0; 7],
             tape_scroll: [0; 7],
             state_scroll: 0,
+            state_hscroll: 0,
             dis_scroll: 0,
+            dis_hscroll: 0,
             dis_cursor: 0,
             log_scroll: 0,
             show_dis: true,
@@ -170,6 +174,22 @@ impl App {
         if panes.is_empty() { return; }
         let cur_pos = panes.iter().position(|p| p == &self.focus).unwrap_or(0);
         self.focus = panes[(cur_pos + 1) % panes.len()].clone();
+    }
+
+    fn scroll_left(&mut self) {
+        match self.focus {
+            Focus::State => self.state_hscroll = self.state_hscroll.saturating_sub(4),
+            Focus::Dis   => self.dis_hscroll   = self.dis_hscroll.saturating_sub(4),
+            _ => {}
+        }
+    }
+
+    fn scroll_right(&mut self) {
+        match self.focus {
+            Focus::State => self.state_hscroll += 4,
+            Focus::Dis   => self.dis_hscroll   += 4,
+            _ => {}
+        }
     }
 
     fn scroll_up(&mut self) {
@@ -450,6 +470,15 @@ impl App {
             KeyCode::Tab => self.cycle_focus(),
             KeyCode::Up | KeyCode::Char('k') => self.scroll_up(),
             KeyCode::Down | KeyCode::Char('j') => self.scroll_down(),
+            KeyCode::Left => self.scroll_left(),
+            KeyCode::Right => self.scroll_right(),
+            // h/l: horizontal scroll in state/dis, otherwise left/right navigation
+            KeyCode::Char('h') => {
+                if matches!(self.focus, Focus::State | Focus::Dis) {
+                    self.scroll_left();
+                }
+            }
+            KeyCode::Char('l') if matches!(self.focus, Focus::State | Focus::Dis) => self.scroll_right(),
             KeyCode::Char('g') => match self.focus {
                 Focus::Tape(i) => { self.tape_cursor[i] = 0; self.tape_scroll[i] = 0; }
                 Focus::State => self.state_scroll = 0,
@@ -554,6 +583,11 @@ impl App {
             KeyCode::Esc => {
                 self.load_prompt = None;
                 self.load_prompt_buf.clear();
+            }
+            KeyCode::Tab => {
+                if let Some(completed) = tab_complete_path(&self.load_prompt_buf) {
+                    self.load_prompt_buf = completed;
+                }
             }
             KeyCode::Backspace => { self.load_prompt_buf.pop(); }
             KeyCode::Enter => {
@@ -710,6 +744,52 @@ enum TapeRow {
     },
 }
 
+fn tab_complete_path(buf: &str) -> Option<String> {
+    use std::path::Path;
+    let (dir_part, file_prefix): (&str, &str) = if buf.ends_with('/') {
+        (buf, "")
+    } else {
+        let p = Path::new(buf);
+        let dir = p.parent().and_then(|d| d.to_str()).filter(|d| !d.is_empty()).unwrap_or(".");
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        (dir, name)
+    };
+    let dir_search = if dir_part.is_empty() { "." } else { dir_part };
+    let mut matches: Vec<String> = std::fs::read_dir(dir_search).ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| name.starts_with(file_prefix))
+        .collect();
+    matches.sort();
+    if matches.is_empty() { return None; }
+    // find common prefix of matches
+    let completed = if matches.len() == 1 {
+        matches[0].clone()
+    } else {
+        let first = &matches[0];
+        let mut len = first.len();
+        for s in &matches[1..] {
+            len = len.min(s.len());
+            for (i, (a, b)) in first.bytes().zip(s.bytes()).enumerate() {
+                if a != b { len = len.min(i); break; }
+            }
+        }
+        if len <= file_prefix.len() { return None; }
+        first[..len].to_string()
+    };
+    let new_path = if (dir_part == "." && !buf.contains('/')) || dir_part.is_empty() {
+        completed.clone()
+    } else {
+        format!("{}/{}", dir_part.trim_end_matches('/'), completed)
+    };
+    // append trailing slash for unique directory match
+    if matches.len() == 1 && Path::new(&new_path).is_dir() {
+        Some(format!("{}/", new_path))
+    } else {
+        Some(new_path)
+    }
+}
+
 fn parse_tape_entry_str(s: &str) -> Result<TapeEntry, String> {
     let s = s.trim();
     // block marker: [d]
@@ -800,7 +880,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
             (true, true) => {
                 let mid_cols = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+                    .constraints([Constraint::Percentage(62), Constraint::Min(50)])
                     .split(rows[ri]);
                 render_state(f, app, mid_cols[0]);
                 render_dis(f, app, mid_cols[1]);
@@ -991,7 +1071,7 @@ fn render_state(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let scroll_offset = app.state_scroll.min(lines.len().saturating_sub(1)) as u16;
     let p = Paragraph::new(Text::from(lines))
-        .scroll((scroll_offset, 0));
+        .scroll((scroll_offset, app.state_hscroll as u16));
     f.render_widget(p, inner);
 }
 
@@ -1089,7 +1169,7 @@ fn render_dis(f: &mut ratatui::Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled("(no orders)", Style::default().fg(Color::DarkGray))));
     }
 
-    f.render_widget(Paragraph::new(Text::from(lines)), inner);
+    f.render_widget(Paragraph::new(Text::from(lines)).scroll((0, app.dis_hscroll as u16)), inner);
 }
 
 fn render_log(f: &mut ratatui::Frame, app: &App, area: Rect) {
