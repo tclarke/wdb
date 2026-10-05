@@ -8,12 +8,27 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("wdb {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("wdb {} — WITCH computer debugger", env!("CARGO_PKG_VERSION"));
+        println!("Usage: wdb [tape-file]");
+        println!("  --version, -V  Print version");
+        println!("  --help, -h     Print this help");
+        println!("Once running, type 'help' for debugger commands.");
+        return;
+    }
+
     let mut dbg = Debugger::new();
 
     // Load tape file from command-line argument if provided
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
-        let out = dbg.execute(&format!("load {}", args[1]));
+    let tape_arg = args.iter().skip(1).find(|a| !a.starts_with('-'));
+    if let Some(path) = tape_arg {
+        let out = dbg.execute(&format!("load {}", path));
         for line in &out {
             println!("{}", line);
         }

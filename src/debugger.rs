@@ -120,7 +120,11 @@ impl Debugger {
                 self.cmd_search(parts[1], tape_num)
             }
             "break" | "b" => self.cmd_break(&parts[1..]),
-            "dump" => self.cmd_dump(),
+            "dump" => {
+                let show_tapes = parts.get(1).map(|&s| s == "tapes").unwrap_or(false);
+                let show_dis = parts.get(2).map(|&s| s == "dis").unwrap_or(false);
+                self.cmd_dump(show_tapes, show_dis)
+            }
             "help" | "h" | "?" => Self::cmd_help(),
             "quit" | "exit" | "q" => std::process::exit(0),
             cmd => vec![format!("unknown command '{}' (type 'help' for help)", cmd)],
@@ -479,7 +483,10 @@ impl Debugger {
         }).collect()
     }
 
-    fn cmd_dump(&self) -> Vec<String> {
+    fn cmd_dump(&self, show_tapes: bool, show_dis: bool) -> Vec<String> {
+        if show_tapes {
+            return self.cmd_dump_tapes(show_dis);
+        }
         let mut lines = Vec::new();
         lines.push("     | 0            1            2            3            4            5            6            7            8            9".to_string());
         lines.push("-----+".to_string() + &"-".repeat(130));
@@ -513,31 +520,75 @@ impl Debugger {
         lines
     }
 
+    fn cmd_dump_tapes(&self, show_dis: bool) -> Vec<String> {
+        use crate::tape::TapeEntry;
+        let mut lines = Vec::new();
+        let mut any = false;
+        for tape_num in 1..=7usize {
+            let tape = match self.machine.tape_ref(tape_num) {
+                Some(t) => t,
+                None => continue,
+            };
+            any = true;
+            let cur_pos = if self.machine.active_tape_num() == Some(tape_num) {
+                self.machine.current_tape_pos()
+            } else {
+                None
+            };
+            lines.push(format!("=== tape {} ({} entries) ===", tape_num, tape.entries.len()));
+            for (idx, entry) in tape.entries.iter().enumerate() {
+                let marker = if cur_pos == Some(idx) { ">" } else { " " };
+                let base = format!("{} {:4}: {}", marker, idx + 1, entry);
+                if show_dis {
+                    if let TapeEntry::Order(o) = entry {
+                        lines.push(format!("{}  {}", base, disassemble(*o)));
+                    } else {
+                        lines.push(base);
+                    }
+                } else {
+                    lines.push(base);
+                }
+            }
+            lines.push(String::new());
+        }
+        if !any {
+            lines.push("no tapes loaded".to_string());
+        }
+        lines
+    }
+
     fn cmd_help() -> Vec<String> {
-        vec![
-            "Commands:".to_string(),
-            "  run / r              run until halt or Ctrl-C".to_string(),
-            "  step / s             execute one order".to_string(),
-            "  skip                 advance tape without executing".to_string(),
-            "  list [tape]          show tape from current position".to_string(),
-            "  print <loc>          store 10-99, acc, sign, layout, shift".to_string(),
-            "  dis [n]              disassemble next n orders (default 1)".to_string(),
-            "  load <file> [tape]   load tape file".to_string(),
-            "  reset                reset machine, keep tapes".to_string(),
-            "  clear [tape]         unload tape(s)".to_string(),
-            "  exec <order>         execute 5-digit order without advancing tape".to_string(),
-            "  transfer <tape>      transfer control to tape reader 1-7".to_string(),
-            "  search <block> [tape] advance tape to block marker 0-9".to_string(),
-            "  break                list breakpoints".to_string(),
-            "  break block <b> [t]  add breakpoint at block marker b".to_string(),
-            "  break line <n> [t]   add breakpoint at line number n".to_string(),
-            "  break dis <id>       disable breakpoint".to_string(),
-            "  break en <id>        enable breakpoint".to_string(),
-            "  break rm <id>        remove breakpoint".to_string(),
-            "  break when <id> <loc> [<op> <val>]  add condition".to_string(),
-            "  dump                 show full machine state".to_string(),
-            "  quit / exit / q      exit".to_string(),
-        ]
+        let cmds: &[(&str, &str)] = &[
+            ("run / r",                        "run until halt or Ctrl-C"),
+            ("step / s",                       "execute one order"),
+            ("skip",                           "advance tape without executing"),
+            ("list [tape]",                    "show tape from current position"),
+            ("print <loc>",                    "store 10-99, acc, sign, layout, shift"),
+            ("dis [n]",                        "disassemble next n orders (default 1)"),
+            ("load <file> [tape]",             "load tape file"),
+            ("reset",                          "reset machine, keep tapes"),
+            ("clear [tape]",                   "unload tape(s)"),
+            ("exec <order>",                   "execute 5-digit order without advancing tape"),
+            ("transfer <tape>",                "transfer control to tape reader 1-7"),
+            ("search <block> [tape]",          "advance tape to block marker 0-9"),
+            ("break",                          "list breakpoints"),
+            ("break block <b> [t]",            "add breakpoint at block marker b"),
+            ("break line <n> [t]",             "add breakpoint at line number n"),
+            ("break dis <id>",                 "disable breakpoint"),
+            ("break en <id>",                  "enable breakpoint"),
+            ("break rm <id>",                  "remove breakpoint"),
+            ("break when <id> <loc> [op val]", "add condition to breakpoint"),
+            ("dump",                           "show full machine state"),
+            ("dump tapes",                     "dump all loaded tape contents"),
+            ("dump tapes dis",                 "dump tapes with disassembly"),
+            ("quit / exit / q",                "exit"),
+        ];
+        let width = cmds.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
+        let mut out = vec!["Commands:".to_string()];
+        for (cmd, desc) in cmds {
+            out.push(format!("  {:<width$}  {}", cmd, desc, width = width));
+        }
+        out
     }
 
     fn show_position(&self) -> Vec<String> {
