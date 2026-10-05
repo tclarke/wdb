@@ -12,7 +12,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Terminal;
 
 use crate::debugger::{BpKind, Breakpoint, Debugger};
@@ -51,8 +51,10 @@ struct App {
     focus: Focus,
     tape_cursor: [usize; 7],
     tape_scroll: [usize; 7],
-    state_scroll: usize,
-    state_hscroll: usize,
+    tape_hscroll: [usize; 7],
+    state_cursor_row: usize, // 0=acc, 1=sign, 2-10=store decade rows 1-9
+    state_cursor_col: usize, // 0-9, meaningful only for store rows
+    log_hscroll: usize,
     dis_scroll: usize,
     dis_hscroll: usize,
     dis_cursor: usize,
@@ -92,8 +94,10 @@ impl App {
             focus: Focus::Tape(0),
             tape_cursor: [0; 7],
             tape_scroll: [0; 7],
-            state_scroll: 0,
-            state_hscroll: 0,
+            tape_hscroll: [0; 7],
+            state_cursor_row: 2, // start on first store row
+            state_cursor_col: 0,
+            log_hscroll: 0,
             dis_scroll: 0,
             dis_hscroll: 0,
             dis_cursor: 0,
@@ -201,17 +205,27 @@ impl App {
 
     fn scroll_left(&mut self) {
         match self.focus {
-            Focus::State => self.state_hscroll = self.state_hscroll.saturating_sub(4),
-            Focus::Dis   => self.dis_hscroll   = self.dis_hscroll.saturating_sub(4),
-            _ => {}
+            Focus::Tape(i) => self.tape_hscroll[i] = self.tape_hscroll[i].saturating_sub(4),
+            Focus::State => {
+                if self.state_cursor_row >= 2 {
+                    self.state_cursor_col = self.state_cursor_col.saturating_sub(1);
+                }
+            }
+            Focus::Dis => self.dis_hscroll = self.dis_hscroll.saturating_sub(4),
+            Focus::Log => self.log_hscroll = self.log_hscroll.saturating_sub(4),
         }
     }
 
     fn scroll_right(&mut self) {
         match self.focus {
-            Focus::State => self.state_hscroll += 4,
-            Focus::Dis   => self.dis_hscroll   += 4,
-            _ => {}
+            Focus::Tape(i) => self.tape_hscroll[i] += 4,
+            Focus::State => {
+                if self.state_cursor_row >= 2 {
+                    self.state_cursor_col = (self.state_cursor_col + 1).min(9);
+                }
+            }
+            Focus::Dis => self.dis_hscroll += 4,
+            Focus::Log => self.log_hscroll += 4,
         }
     }
 
@@ -225,7 +239,9 @@ impl App {
                     }
                 }
             }
-            Focus::State => self.state_scroll = self.state_scroll.saturating_sub(1),
+            Focus::State => {
+                if self.state_cursor_row > 0 { self.state_cursor_row -= 1; }
+            }
             Focus::Dis => self.move_dis_cursor(-1),
             Focus::Log => {
                 let max = self.log.len().saturating_sub(1);
@@ -242,7 +258,9 @@ impl App {
                     self.tape_cursor[i] += 1;
                 }
             }
-            Focus::State => self.state_scroll += 1,
+            Focus::State => {
+                if self.state_cursor_row < 10 { self.state_cursor_row += 1; }
+            }
             Focus::Dis => self.move_dis_cursor(1),
             Focus::Log => {
                 if self.log_scroll > 0 {
@@ -505,7 +523,7 @@ impl App {
             KeyCode::Char('l') if matches!(self.focus, Focus::State | Focus::Dis) => self.scroll_right(),
             KeyCode::Char('g') => match self.focus {
                 Focus::Tape(i) => { self.tape_cursor[i] = 0; self.tape_scroll[i] = 0; }
-                Focus::State => self.state_scroll = 0,
+                Focus::State => { self.state_cursor_row = 0; self.state_cursor_col = 0; }
                 Focus::Dis => self.dis_scroll = 0,
                 Focus::Log => self.log_scroll = self.log.len().saturating_sub(1),
             },
@@ -514,7 +532,7 @@ impl App {
                     let len = tape_display_len(&self.debugger.machine, i);
                     self.tape_cursor[i] = len.saturating_sub(1);
                 }
-                Focus::State => self.state_scroll = 100,
+                Focus::State => { self.state_cursor_row = 10; self.state_cursor_col = 9; }
                 Focus::Dis => self.dis_scroll = 100,
                 Focus::Log => self.log_scroll = 0,
             },
@@ -522,9 +540,17 @@ impl App {
                 match self.focus {
                     Focus::Tape(i) => self.begin_edit_tape(i),
                     Focus::State => {
-                        // edit store at current cursor row
-                        let addr = 10 + self.state_scroll.min(89);
-                        self.begin_edit_store(addr);
+                        match self.state_cursor_row {
+                            0 => self.begin_edit_store(8),
+                            1 => {
+                                self.debugger.machine.sign_flag = match self.debugger.machine.sign_flag {
+                                    None => Some(true),
+                                    Some(true) => Some(false),
+                                    Some(false) => None,
+                                };
+                            }
+                            r => self.begin_edit_store((r - 1) * 10 + self.state_cursor_col),
+                        }
                     }
                     _ => {}
                 }
@@ -1020,17 +1046,18 @@ fn render_tape_panel(f: &mut ratatui::Frame, app: &App, area: Rect, tape_idx: us
         s
     };
 
-    let items: Vec<ListItem> = rows.iter().enumerate().skip(scroll).take(visible_height)
+    let hscroll = app.tape_hscroll[tape_idx];
+    let mut max_content_width = 0usize;
+
+    let lines: Vec<Line> = rows.iter().enumerate().skip(scroll).take(visible_height)
         .map(|(row_idx, row)| {
             let selected = focused && row_idx == cursor;
             match row {
                 TapeRow::Comment(text) => {
-                    let line = Line::from(Span::styled(
-                        format!("  ; {}", text),
-                        Style::default().fg(Color::DarkGray),
-                    ));
-                    let item = ListItem::new(line);
-                    if selected { item.style(Style::default().add_modifier(Modifier::REVERSED)) } else { item }
+                    let s = format!("  ; {}", text);
+                    max_content_width = max_content_width.max(s.chars().count());
+                    let line = Line::from(Span::styled(s, Style::default().fg(Color::DarkGray)));
+                    if selected { line.style(Style::default().add_modifier(Modifier::REVERSED)) } else { line }
                 }
                 TapeRow::Entry { entry_idx, entry, at_cur, bp_id, bp_enabled, inline } => {
                     let (bp_char, bp_style) = bp_marker_char(*bp_id, *bp_enabled);
@@ -1042,28 +1069,30 @@ fn render_tape_panel(f: &mut ratatui::Frame, app: &App, area: Rect, tape_idx: us
                     };
                     let num_style = Style::default().fg(Color::DarkGray);
                     let entry_text = entry.to_string();
+                    let num_str = format!("{:4}: ", entry_idx + 1);
+                    let mut width = 1 + 1 + num_str.chars().count() + entry_text.chars().count();
                     let mut spans = vec![
                         Span::styled(bp_char, bp_style),
                         Span::styled(cur_char, cur_style),
-                        Span::styled(format!("{:4}: ", entry_idx + 1), num_style),
+                        Span::styled(num_str, num_style),
                         Span::raw(entry_text),
                     ];
                     if let Some(comment) = inline {
-                        spans.push(Span::styled(
-                            format!("  ; {}", comment),
-                            Style::default().fg(Color::DarkGray),
-                        ));
+                        let cs = format!("  ; {}", comment);
+                        width += cs.chars().count();
+                        spans.push(Span::styled(cs, Style::default().fg(Color::DarkGray)));
                     }
+                    max_content_width = max_content_width.max(width);
                     let line = Line::from(spans);
-                    let item = ListItem::new(line);
-                    if selected { item.style(Style::default().add_modifier(Modifier::REVERSED)) } else { item }
+                    if selected { line.style(Style::default().add_modifier(Modifier::REVERSED)) } else { line }
                 }
             }
         })
         .collect();
 
-    let list = List::new(items);
-    f.render_widget(list, inner);
+    let eff_hscroll = hscroll.min(max_content_width.saturating_sub(inner.width as usize));
+    let p = Paragraph::new(Text::from(lines)).scroll((0, eff_hscroll as u16));
+    f.render_widget(p, inner);
 }
 
 fn render_state(f: &mut ratatui::Frame, app: &App, area: Rect) {
@@ -1096,14 +1125,20 @@ fn render_state(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Some(false) => "-".into(),
     };
 
+    let sel_val_style = |base: Style| if focused { base.add_modifier(Modifier::REVERSED) } else { base };
+
     let mut lines: Vec<Line> = vec![
         Line::from(vec![
             Span::styled("acc:  ", Style::default().fg(Color::DarkGray)),
-            Span::raw(m.acc.to_string()),
+            Span::styled(m.acc.to_string(),
+                if focused && app.state_cursor_row == 0 { Style::default().add_modifier(Modifier::REVERSED) }
+                else { Style::default() }),
         ]),
         Line::from(vec![
             Span::styled("sign: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(sign_str),
+            Span::styled(sign_str,
+                if focused && app.state_cursor_row == 1 { Style::default().add_modifier(Modifier::REVERSED) }
+                else { Style::default() }),
         ]),
         Line::from(vec![
             Span::styled("ip:   ", Style::default().fg(Color::DarkGray)),
@@ -1114,12 +1149,17 @@ fn render_state(f: &mut ratatui::Frame, app: &App, area: Rect) {
             Span::styled(halt_str, if m.halted { Style::default().fg(Color::Red) } else { Style::default() }),
         ]),
         Line::from(Span::styled("────── stores ──────", Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(
+            format!("    {}", (0..10).map(|c| format!("{:>12}", c)).collect::<Vec<_>>().join(" ")),
+            Style::default().fg(Color::DarkGray),
+        )),
     ];
 
     // Store grid: one row per tens-decade (10-19, 20-29, ..., 90-99)
+    // cursor_row 2 = decade 1, ..., cursor_row 10 = decade 9
     for decade in 1..=9usize {
         let base = decade * 10;
-        let selected_decade = focused && app.state_scroll / 10 == decade;
+        let cursor_on_row = focused && app.state_cursor_row == decade + 1;
         let mut spans = vec![Span::styled(
             format!("{:2}: ", base),
             Style::default().fg(Color::DarkGray),
@@ -1128,28 +1168,56 @@ fn render_state(f: &mut ratatui::Frame, app: &App, area: Rect) {
             let addr = base + col;
             if addr > 99 { break; }
             let val = m.stores[addr - 10];
-            let style = if val.negative && val.magnitude > 0 {
+            let base_style = if val.negative && val.magnitude > 0 {
                 Style::default().fg(Color::Red)
             } else if val.magnitude > 0 {
                 Style::default().fg(Color::Green)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            let text = format!("{:>12}", val.to_string());
-            if selected_decade && (app.state_scroll % 10) == col {
-                spans.push(Span::styled(text, style.add_modifier(Modifier::REVERSED)));
+            let style = if cursor_on_row && app.state_cursor_col == col {
+                sel_val_style(base_style)
             } else {
-                spans.push(Span::styled(text, style));
-            }
+                base_style
+            };
+            spans.push(Span::styled(format!("{:>12}", val.to_string()), style));
             if col < 9 { spans.push(Span::raw(" ")); }
         }
         lines.push(Line::from(spans));
     }
 
-    let scroll_offset = app.state_scroll.min(lines.len().saturating_sub(1)) as u16;
-    let p = Paragraph::new(Text::from(lines))
-        .scroll((scroll_offset, app.state_hscroll as u16));
-    f.render_widget(p, inner);
+    // Split: fixed top (acc/sign/ip/halt/divider, 5 lines, no scroll) +
+    //        scrollable body (col-header + 9 decades, h-scroll + v-scroll)
+    let body_lines = lines.split_off(5);
+    let head_lines = lines;
+
+    let head_h = 5usize.min(inner.height as usize);
+    let body_h = (inner.height as usize).saturating_sub(head_h);
+
+    // Vertical scroll: col-header is body line 0, decade N is body line N+1 (cursor_row 2..=10)
+    let body_v = if app.state_cursor_row >= 2 && body_h > 0 {
+        let line = app.state_cursor_row - 1; // header=0, decade1=1, ..., decade9=9
+        if line + 1 > body_h { (line + 1 - body_h) as u16 } else { 0 }
+    } else { 0 };
+
+    // Horizontal scroll: column n occupies [4+n*13, 15+n*13] in each row
+    let body_hscroll = if app.state_cursor_row >= 2 {
+        let col_end = 15 + app.state_cursor_col * 13;
+        let w = inner.width as usize;
+        if col_end + 2 > w { (col_end + 2 - w) as u16 } else { 0 }
+    } else { 0 };
+
+    if head_h > 0 {
+        let hr = Rect::new(inner.x, inner.y, inner.width, head_h as u16);
+        f.render_widget(Paragraph::new(Text::from(head_lines)), hr);
+    }
+    if body_h > 0 {
+        let br = Rect::new(inner.x, inner.y + head_h as u16, inner.width, body_h as u16);
+        f.render_widget(
+            Paragraph::new(Text::from(body_lines)).scroll((body_v, body_hscroll)),
+            br,
+        );
+    }
 }
 
 fn render_dis(f: &mut ratatui::Frame, app: &App, area: Rect) {
@@ -1246,7 +1314,12 @@ fn render_dis(f: &mut ratatui::Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled("(no orders)", Style::default().fg(Color::DarkGray))));
     }
 
-    f.render_widget(Paragraph::new(Text::from(lines)).scroll((0, app.dis_hscroll as u16)), inner);
+    let max_width: usize = lines.iter()
+        .map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    let eff_hscroll = app.dis_hscroll.min(max_width.saturating_sub(inner.width as usize));
+    f.render_widget(Paragraph::new(Text::from(lines)).scroll((0, eff_hscroll as u16)), inner);
 }
 
 fn render_log(f: &mut ratatui::Frame, app: &App, area: Rect) {
@@ -1277,7 +1350,12 @@ fn render_log(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .take(height)
         .map(|l| Line::from(l.as_str()))
         .collect();
-    f.render_widget(Paragraph::new(Text::from(lines)), inner);
+    let max_width: usize = lines.iter()
+        .map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    let eff_hscroll = app.log_hscroll.min(max_width.saturating_sub(inner.width as usize));
+    f.render_widget(Paragraph::new(Text::from(lines)).scroll((0, eff_hscroll as u16)), inner);
 }
 
 fn render_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
