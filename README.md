@@ -18,7 +18,7 @@ To build locally:
 git clone https://github.com/tclarke/wdb.git
 cd web
 cargo build --release
-./target/wdb
+./target/release/wdb
 ```
 
 Prompt: `(witch)`. Type `help` for command list. Ctrl+C during `run` interrupts execution.
