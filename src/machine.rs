@@ -18,6 +18,24 @@ pub enum HaltReason {
     SameGroupViolation,
 }
 
+impl HaltReason {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            HaltReason::Finish => 0,
+            HaltReason::Signal => 1,
+            HaltReason::Overflow(_, _) => 2,
+            HaltReason::DivideByPosZero(_) => 3,
+            HaltReason::ConditionalJumpNoTest => 4,
+            HaltReason::TapeExhausted(_) => 5,
+            HaltReason::TapeNotLoaded(_) => 6,
+            HaltReason::InvalidOrder(_) => 7,
+            HaltReason::InvalidAddress(_) => 8,
+            HaltReason::NoLayout => 9,
+            HaltReason::SameGroupViolation => 10,
+        }
+    }
+}
+
 impl fmt::Display for HaltReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -135,6 +153,12 @@ impl Machine {
         if let IP::Tape { reader, ref mut pos } = self.ip {
             if let Some(tape) = &self.tapes[reader] {
                 *pos = tape.pos;
+            }
+        }
+        if let Err(ref reason) = result {
+            if !self.halted {
+                self.halted = true;
+                self.halt_reason = Some(reason.clone());
             }
         }
         result

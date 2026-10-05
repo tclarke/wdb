@@ -16,17 +16,45 @@ fn main() {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("wdb {} — WITCH computer debugger", env!("CARGO_PKG_VERSION"));
-        println!("Usage: wdb [tape-file]");
+        println!("Usage: wdb [--batch] [tape-file]");
         println!("  --version, -V  Print version");
         println!("  --help, -h     Print this help");
+        println!("  --batch        Run tape non-interactively and exit");
         println!("Once running, type 'help' for debugger commands.");
         return;
     }
+
+    let batch = args.iter().any(|a| a == "--batch");
 
     let mut dbg = Debugger::new();
 
     // Load tape file from command-line argument if provided
     let tape_arg = args.iter().skip(1).find(|a| !a.starts_with('-'));
+
+    if batch {
+        let path = match tape_arg {
+            Some(p) => p,
+            None => {
+                eprintln!("wdb: --batch requires a tape file");
+                std::process::exit(1);
+            }
+        };
+        for line in dbg.execute(&format!("load {}", path)) {
+            eprintln!("{}", line);
+        }
+        for line in dbg.execute("reset") {
+            eprintln!("{}", line);
+        }
+        for line in dbg.execute("run") {
+            print!("{}", line);
+            if !line.ends_with('\n') {
+                println!();
+            }
+        }
+        let code = dbg.machine.halt_reason.as_ref().map(|r| r.exit_code()).unwrap_or(0);
+        std::process::exit(code);
+    }
+
     if let Some(path) = tape_arg {
         let out = dbg.execute(&format!("load {}", path));
         for line in &out {
