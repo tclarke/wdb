@@ -63,6 +63,33 @@ impl fmt::Display for WitchNum {
     }
 }
 
+impl WitchNum {
+    /// Parse `+D.DDDDDDD` or `-D.DDDDDDD` (as produced by Display).
+    /// Also accepts plain integers like `12345678` (no decimal point, no sign = positive).
+    pub fn from_display_str(s: &str) -> Option<WitchNum> {
+        let s = s.trim();
+        let (negative, rest) = if let Some(r) = s.strip_prefix('-') {
+            (true, r)
+        } else if let Some(r) = s.strip_prefix('+') {
+            (false, r)
+        } else {
+            (false, s)
+        };
+        let magnitude = if let Some((int_part, frac_part)) = rest.split_once('.') {
+            let int_digits: u64 = int_part.parse().ok()?;
+            let frac_str = format!("{:0<7}", frac_part);
+            let frac_digits: u64 = frac_str[..7].parse().ok()?;
+            int_digits * 10_000_000 + frac_digits
+        } else {
+            rest.parse().ok()?
+        };
+        if magnitude > 99_999_999 {
+            return None;
+        }
+        Some(WitchNum { magnitude, negative })
+    }
+}
+
 /// Sign-magnitude 16-digit decimal accumulator, scaled by 10^7.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WitchAcc {
@@ -101,6 +128,34 @@ impl fmt::Display for WitchAcc {
         let hi_first = hi / 10_000_000;
         let hi_rest = hi % 10_000_000;
         write!(f, "{}{}.{:07}{:08}", sign, hi_first, hi_rest, lo)
+    }
+}
+
+impl WitchAcc {
+    /// Parse the 16-digit acc format `±D.DDDDDDDDDDDDDDD` (as produced by Display).
+    /// Also accepts shorter forms; missing digits are treated as zero.
+    pub fn from_display_str(s: &str) -> Option<WitchAcc> {
+        let s = s.trim();
+        let (negative, rest) = if let Some(r) = s.strip_prefix('-') {
+            (true, r)
+        } else if let Some(r) = s.strip_prefix('+') {
+            (false, r)
+        } else {
+            (false, s)
+        };
+        let magnitude = if let Some((int_part, frac_part)) = rest.split_once('.') {
+            let int_digits: u64 = int_part.parse().ok()?;
+            // frac is 15 digits total (7+8), pad/truncate to 15
+            let frac_str = format!("{:0<15}", frac_part);
+            let frac_digits: u64 = frac_str[..15].parse().ok()?;
+            int_digits * 1_000_000_000_000_000 + frac_digits
+        } else {
+            rest.parse().ok()?
+        };
+        if magnitude > 9_999_999_999_999_999 {
+            return None;
+        }
+        Some(WitchAcc { magnitude, negative })
     }
 }
 

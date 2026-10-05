@@ -2,6 +2,7 @@ mod debugger;
 mod disasm;
 mod machine;
 mod tape;
+mod tui;
 
 use colored::Colorize;
 use debugger::Debugger;
@@ -17,7 +18,7 @@ fn main() {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("wdb {} — WITCH computer debugger", env!("CARGO_PKG_VERSION"));
-        println!("Usage: wdb [--batch] [--color|--no-color] [tape-file]");
+        println!("Usage: wdb [--batch] [--tui] [--color|--no-color] [tape-file]");
         println!("  --version, -V  Print version");
         println!("  --help, -h     Print this help");
         println!("  --batch        Run tape non-interactively and exit");
@@ -33,6 +34,7 @@ fn main() {
         colored::control::set_override(false);
     }
 
+    let tui_mode = args.iter().any(|a| a == "--tui");
     let batch = args.iter().any(|a| a == "--batch");
 
     let mut dbg = Debugger::new();
@@ -74,6 +76,14 @@ fn main() {
         for line in &out {
             println!("{}", line);
         }
+    }
+
+    if tui_mode {
+        if let Err(e) = tui::run_tui(dbg) {
+            eprintln!("tui error: {}", e);
+            std::process::exit(1);
+        }
+        return;
     }
 
     println!("{}", "WITCH Debugger (type 'help' for commands)".bold());

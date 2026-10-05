@@ -865,6 +865,14 @@ impl Debugger {
         }
     }
 
+    pub fn breakpoints(&self) -> &[Breakpoint] {
+        &self.breakpoints
+    }
+
+    pub fn check_break(&mut self) -> Option<String> {
+        self.check_breakpoints()
+    }
+
     fn check_breakpoints(&mut self) -> Option<String> {
         let (tape_num, pos) = match self.machine.ip {
             IP::Tape { reader, pos } => (reader + 1, pos),
