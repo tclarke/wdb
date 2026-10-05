@@ -88,7 +88,7 @@ impl Debugger {
 
         match parts[0] {
             "run" | "r" => self.cmd_run(),
-            "step" | "s" => self.cmd_step(),
+            "step" | "s" | "next" | "n" => self.cmd_step(),
             "skip" => self.cmd_skip(),
             "list" | "l" => {
                 let tape_num = parts.get(1).and_then(|s| s.parse().ok());
@@ -100,8 +100,8 @@ impl Debugger {
                 }
                 self.cmd_print(parts[1])
             }
-            "dis" | "d" => {
-                let n = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+            "dis" => {
+                let n = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(7);
                 self.cmd_dis(n)
             }
             "load" => {
@@ -136,7 +136,7 @@ impl Debugger {
                 self.cmd_search(parts[1], tape_num)
             }
             "break" | "b" => self.cmd_break(&parts[1..]),
-            "dump" => {
+            "dump" | "d" => {
                 let show_tapes = parts.get(1).map(|&s| s == "tapes").unwrap_or(false);
                 let show_dis = parts.get(2).map(|&s| s == "dis").unwrap_or(false);
                 self.cmd_dump(show_tapes, show_dis)
@@ -638,11 +638,11 @@ impl Debugger {
     fn cmd_help() -> Vec<String> {
         let cmds: &[(&str, &str)] = &[
             ("run / r",                        "run until halt or Ctrl-C"),
-            ("step / s",                       "execute one order"),
+            ("step / s / next / n",            "execute one order"),
             ("skip",                           "advance tape without executing"),
             ("list [tape]",                    "show tape from current position"),
             ("print <loc>",                    "store 10-99, acc, sign, layout, shift"),
-            ("dis [n]",                        "disassemble next n orders (default 1)"),
+            ("dis [n]",                        "disassemble next n orders (default 7)"),
             ("load <file> [tape]",             "load tape file"),
             ("reset",                          "reset machine, keep tapes"),
             ("clear [tape]",                   "unload tape(s)"),
@@ -656,7 +656,7 @@ impl Debugger {
             ("break en <id>",                  "enable breakpoint"),
             ("break rm <id>",                  "remove breakpoint"),
             ("break when <id> <loc> [op val]", "add condition to breakpoint"),
-            ("dump",                           "show full machine state"),
+            ("dump / d",                       "show full machine state"),
             ("dump tapes",                     "dump all loaded tape contents"),
             ("dump tapes dis",                 "dump tapes with disassembly"),
             ("quit / exit / q",                "exit"),
