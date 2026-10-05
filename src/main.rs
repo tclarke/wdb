@@ -88,12 +88,15 @@ fn main() {
                     let _ = rl.add_history_entry(line);
                 }
                 let output = dbg.execute(line);
+                let non_empty = output.iter().any(|l| !l.is_empty());
                 for out_line in output {
                     print!("{}", out_line);
-                    // add newline if the output doesn't end with one
                     if !out_line.ends_with('\n') {
                         println!();
                     }
+                }
+                if non_empty {
+                    println!();
                 }
             }
             Err(ReadlineError::Interrupted) => {

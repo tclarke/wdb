@@ -1,6 +1,6 @@
 use crate::disasm::disassemble;
 use crate::machine::{Machine, Output, IP};
-use crate::tape::{parse_tape_file, TapeEntry, WitchNum};
+use crate::tape::{parse_tape_file, TapeEntry, WitchAcc, WitchNum};
 use colored::Colorize;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +18,35 @@ fn color_num(n: WitchNum) -> String {
         s.red().to_string()
     } else {
         s.green().to_string()
+    }
+}
+
+fn color_acc(n: WitchAcc) -> String {
+    let s = n.to_string();
+    if n.magnitude == 0 {
+        s
+    } else if n.negative {
+        s.red().to_string()
+    } else {
+        s.green().to_string()
+    }
+}
+
+struct MachineSnapshot {
+    stores: [WitchNum; 90],
+    acc: WitchAcc,
+    sign_flag: Option<bool>,
+    tape_positions: [Option<usize>; 7],
+}
+
+impl MachineSnapshot {
+    fn capture(m: &Machine) -> Self {
+        MachineSnapshot {
+            stores: m.stores,
+            acc: m.acc,
+            sign_flag: m.sign_flag,
+            tape_positions: std::array::from_fn(|i| m.tapes[i].as_ref().map(|t| t.pos)),
+        }
     }
 }
 
@@ -77,6 +106,7 @@ pub struct Debugger {
     breakpoints: Vec<Breakpoint>,
     next_bp_id: usize,
     autodis: bool,
+    autowhat: bool,
     last_cmd: LastCmd,
 }
 
@@ -87,6 +117,7 @@ impl Debugger {
             breakpoints: Vec::new(),
             next_bp_id: 1,
             autodis: true,
+            autowhat: true,
             last_cmd: LastCmd::None,
         }
     }
@@ -122,7 +153,7 @@ impl Debugger {
             }
             "set" => {
                 if parts.len() < 3 {
-                    return vec!["usage: set autodis true|false".to_string()];
+                    return vec!["usage: set autodis|autowhat true|false".to_string()];
                 }
                 self.cmd_set(parts[1], parts[2])
             }
@@ -207,6 +238,7 @@ impl Debugger {
         if self.machine.halted {
             return vec!["machine halted; use 'reset' to restart".yellow().to_string()];
         }
+        let snap = if self.autowhat { Some(MachineSnapshot::capture(&self.machine)) } else { None };
         let mut out = Vec::new();
         match self.machine.step() {
             Ok(outs) => out.extend(outs.into_iter().flat_map(format_output)),
@@ -216,13 +248,75 @@ impl Debugger {
                 return out;
             }
         }
+        if let Some(before) = snap {
+            let what = self.format_what_changed(&before);
+            if !what.is_empty() {
+                out.push(String::new());
+                out.extend(what);
+            }
+        }
         if self.autodis {
             let (dis_out, _) = self.dis_lines(None, 1);
+            if !dis_out.is_empty() { out.push(String::new()); }
             out.extend(dis_out);
-        } else {
-            out.extend(self.show_position());
         }
         out
+    }
+
+    fn format_what_changed(&self, before: &MachineSnapshot) -> Vec<String> {
+        let mut parts: Vec<String> = Vec::new();
+        let m = &self.machine;
+
+        // changed stores
+        for i in 0..90usize {
+            if m.stores[i] != before.stores[i] {
+                let addr = i + 10;
+                let old = if use_color() { color_num(before.stores[i]) } else { before.stores[i].to_string() };
+                let new = if use_color() { color_num(m.stores[i]) } else { m.stores[i].to_string() };
+                parts.push(format!("store {:02}: {} -> {}", addr, old, new));
+            }
+        }
+
+        // changed acc
+        if m.acc != before.acc {
+            let old = if use_color() { color_acc(before.acc) } else { before.acc.to_string() };
+            let new = if use_color() { color_acc(m.acc) } else { m.acc.to_string() };
+            parts.push(format!("acc: {} -> {}", old, new));
+        }
+
+        // changed sign flag
+        if m.sign_flag != before.sign_flag {
+            let fmt_flag = |f: Option<bool>| match f {
+                None => "unset".to_string(),
+                Some(true) => "+".to_string(),
+                Some(false) => "-".to_string(),
+            };
+            parts.push(format!("sign: {} -> {}", fmt_flag(before.sign_flag), fmt_flag(m.sign_flag)));
+        }
+
+        // tape advances (non-IP tapes only — IP advance is expected)
+        let active = m.active_tape_num();
+        for i in 0..7usize {
+            let tape_num = i + 1;
+            if Some(tape_num) == active { continue; }
+            let old_pos = before.tape_positions[i];
+            let new_pos = m.tapes[i].as_ref().map(|t| t.pos);
+            if old_pos != new_pos {
+                let old_s = old_pos.map(|p| (p + 1).to_string()).unwrap_or_else(|| "?".into());
+                let new_s = new_pos.map(|p| (p + 1).to_string()).unwrap_or_else(|| "?".into());
+                parts.push(format!("tape {} pos: {} -> {}", tape_num, old_s, new_s));
+            }
+        }
+
+        if parts.is_empty() {
+            return Vec::new();
+        }
+
+        if use_color() {
+            vec![parts.join("  ").dimmed().to_string()]
+        } else {
+            vec![parts.join("  ")]
+        }
     }
 
     fn cmd_skip(&mut self) -> Vec<String> {
@@ -701,6 +795,7 @@ impl Debugger {
             ("print <loc>",                    "store 10-99, acc, sign, layout, shift"),
             ("dis [L:N]",                      "disassemble N orders from line L (default: 4 from current)"),
             ("set autodis true|false",         "auto-disassemble next instruction after step"),
+            ("set autowhat true|false",        "show changed stores/acc/flags/tape positions after step"),
             ("load <file> [tape]",             "load tape file"),
             ("reset",                          "reset machine, keep tapes"),
             ("clear [tape]",                   "unload tape(s)"),
@@ -744,7 +839,12 @@ impl Debugger {
                 "false" | "off" | "0" => { self.autodis = false; vec!["autodis off".to_string()] }
                 _ => vec![format!("invalid value '{}' (use true/false)", val)],
             },
-            _ => vec![format!("unknown setting '{}' (use: autodis)", key)],
+            "autowhat" => match val {
+                "true" | "on" | "1" => { self.autowhat = true; vec!["autowhat on".to_string()] }
+                "false" | "off" | "0" => { self.autowhat = false; vec!["autowhat off".to_string()] }
+                _ => vec![format!("invalid value '{}' (use true/false)", val)],
+            },
+            _ => vec![format!("unknown setting '{}' (use: autodis, autowhat)", key)],
         }
     }
 
