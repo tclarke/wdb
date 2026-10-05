@@ -191,18 +191,29 @@ impl Debugger {
 
     fn cmd_list(&self, tape_num: Option<usize>) -> Vec<String> {
         let tape_num = tape_num.unwrap_or_else(|| self.machine.active_tape_num().unwrap_or(1));
-        let entries = self.machine.peek_tape_entries(tape_num, 20);
-        if entries.is_empty() {
+        let tape = match self.machine.tape_ref(tape_num) {
+            Some(t) => t,
+            None => return vec![format!("tape {} not loaded or empty", tape_num)],
+        };
+        if tape.entries.is_empty() {
             return vec![format!("tape {} not loaded or empty", tape_num)];
         }
         let cur_pos = self.machine.current_tape_pos();
-        entries
-            .iter()
-            .map(|(idx, entry)| {
-                let marker = if cur_pos == Some(*idx) { ">" } else { " " };
-                format!("{} {:4}: {}", marker, idx + 1, entry)
-            })
-            .collect()
+        let start = cur_pos.unwrap_or(tape.pos);
+        let mut items: Vec<(String, Option<String>)> = Vec::new();
+        let mut comment_idx = tape.comments.partition_point(|(before, _)| *before < start);
+        for (idx, entry) in tape.entries.iter().enumerate().skip(start).take(20) {
+            while comment_idx < tape.comments.len() && tape.comments[comment_idx].0 == idx {
+                items.push((format!("      ; {}", tape.comments[comment_idx].1), None));
+                comment_idx += 1;
+            }
+            let inline = tape.inline_comments.iter()
+                .find(|(i, _)| *i == idx)
+                .map(|(_, c)| c.clone());
+            let marker = if cur_pos == Some(idx) { ">" } else { " " };
+            items.push((format!("{} {:4}: {}", marker, idx + 1, entry), inline));
+        }
+        align_inline_comments(items)
     }
 
     fn cmd_print(&self, loc: &str) -> Vec<String> {
@@ -237,21 +248,25 @@ impl Debugger {
     fn cmd_dis(&self, n: usize) -> Vec<String> {
         let tape_num = self.machine.active_tape_num().unwrap_or(1);
         let entries = self.machine.peek_tape_entries(tape_num, n * 4 + 10);
-        let mut result = Vec::new();
+        let inline_comments = self.machine.tape_ref(tape_num).map(|t| t.inline_comments.as_slice()).unwrap_or(&[]);
+        let mut items: Vec<(String, Option<String>)> = Vec::new();
         let mut count = 0;
         for (idx, entry) in &entries {
             if count >= n {
                 break;
             }
             if let TapeEntry::Order(o) = entry {
-                result.push(format!("{:4}: {:05}  {}", idx + 1, o, disassemble(*o)));
+                let inline = inline_comments.iter()
+                    .find(|(i, _)| i == idx)
+                    .map(|(_, c)| c.clone());
+                items.push((format!("{:4}: {:05}  {}", idx + 1, o, disassemble(*o)), inline));
                 count += 1;
             }
         }
-        if result.is_empty() {
-            result.push("no orders at current position".to_string());
+        if items.is_empty() {
+            return vec!["no orders at current position".to_string()];
         }
-        result
+        align_inline_comments(items)
     }
 
     fn cmd_load(&mut self, filename: &str, only_tape: Option<usize>) -> Vec<String> {
@@ -536,19 +551,34 @@ impl Debugger {
                 None
             };
             lines.push(format!("=== tape {} ({} entries) ===", tape_num, tape.entries.len()));
+            let mut items: Vec<(String, Option<String>)> = Vec::new();
+            let mut comment_idx = 0usize;
             for (idx, entry) in tape.entries.iter().enumerate() {
+                while comment_idx < tape.comments.len() && tape.comments[comment_idx].0 == idx {
+                    items.push((format!("      ; {}", tape.comments[comment_idx].1), None));
+                    comment_idx += 1;
+                }
+                let inline = tape.inline_comments.iter()
+                    .find(|(i, _)| *i == idx)
+                    .map(|(_, c)| c.clone());
                 let marker = if cur_pos == Some(idx) { ">" } else { " " };
                 let base = format!("{} {:4}: {}", marker, idx + 1, entry);
                 if show_dis {
                     if let TapeEntry::Order(o) = entry {
-                        lines.push(format!("{}  {}", base, disassemble(*o)));
+                        items.push((format!("{}  {}", base, disassemble(*o)), inline));
                     } else {
-                        lines.push(base);
+                        items.push((base, inline));
                     }
                 } else {
-                    lines.push(base);
+                    items.push((base, inline));
                 }
             }
+            // trailing comments after all entries
+            while comment_idx < tape.comments.len() {
+                items.push((format!("      ; {}", tape.comments[comment_idx].1), None));
+                comment_idx += 1;
+            }
+            lines.extend(align_inline_comments(items));
             lines.push(String::new());
         }
         if !any {
@@ -674,4 +704,17 @@ fn format_output(o: Output) -> Vec<String> {
         Output::Print(dst, s) => vec![format!("{:02}| {}", dst, s)],
         Output::Perforate(dst, s) => vec![format!("{:02}| {}", dst, s)],
     }
+}
+
+fn align_inline_comments(items: Vec<(String, Option<String>)>) -> Vec<String> {
+    let col = items.iter()
+        .filter(|(_, c)| c.is_some())
+        .map(|(base, _)| base.len())
+        .max()
+        .map(|m| m + 4)
+        .unwrap_or(0);
+    items.into_iter().map(|(base, comment)| match comment {
+        None => base,
+        Some(c) => format!("{:<col$}; {}", base, c, col = col),
+    }).collect()
 }

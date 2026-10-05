@@ -126,13 +126,17 @@ impl fmt::Display for TapeEntry {
 #[derive(Clone, Debug)]
 pub struct Tape {
     pub entries: Vec<TapeEntry>,
+    /// Standalone comments: (before_entry_idx, text). `before_entry_idx == entries.len()` = trailing.
+    pub comments: Vec<(usize, String)>,
+    /// Inline comments on the same source line as an entry: (entry_idx, text).
+    pub inline_comments: Vec<(usize, String)>,
     pub pos: usize,
     pub looped: bool,
 }
 
 impl Tape {
-    pub fn new(entries: Vec<TapeEntry>, looped: bool) -> Self {
-        Tape { entries, pos: 0, looped }
+    pub fn new(entries: Vec<TapeEntry>, comments: Vec<(usize, String)>, inline_comments: Vec<(usize, String)>, looped: bool) -> Self {
+        Tape { entries, comments, inline_comments, pos: 0, looped }
     }
 
     /// Advance pos past current entry, wrapping if looped.
@@ -173,14 +177,28 @@ pub fn parse_tape_content(content: &str) -> Result<Vec<(usize, Tape)>, String> {
     let mut current_tape_num: Option<usize> = None;
     let mut current_looped = false;
     let mut current_entries: Vec<TapeEntry> = Vec::new();
+    let mut current_comments: Vec<(usize, String)> = Vec::new();
+    let mut current_inline_comments: Vec<(usize, String)> = Vec::new();
 
     for (lineno, raw_line) in content.lines().enumerate() {
         let lineno = lineno + 1;
-        // strip comment
-        let line = if let Some(idx) = raw_line.find(';') {
-            &raw_line[..idx]
+        let trimmed = raw_line.trim();
+
+        // standalone comment line
+        if trimmed.starts_with(';') {
+            if current_tape_num.is_some() {
+                let text = trimmed[1..].trim().to_string();
+                current_comments.push((current_entries.len(), text));
+            }
+            continue;
+        }
+
+        // strip inline comment, capturing its text
+        let (line, maybe_inline) = if let Some(semi) = raw_line.find(';') {
+            let text = raw_line[semi + 1..].trim().to_string();
+            (&raw_line[..semi], if text.is_empty() { None } else { Some(text) })
         } else {
-            raw_line
+            (raw_line, None)
         };
         let line = line.trim();
         if line.is_empty() {
@@ -192,12 +210,16 @@ pub fn parse_tape_content(content: &str) -> Result<Vec<(usize, Tape)>, String> {
             // save previous tape if any
             if let Some(num) = current_tape_num {
                 let entries = std::mem::take(&mut current_entries);
-                tapes.push((num, Tape::new(entries, current_looped)));
+                let comments = std::mem::take(&mut current_comments);
+                let inline_comments = std::mem::take(&mut current_inline_comments);
+                tapes.push((num, Tape::new(entries, comments, inline_comments, current_looped)));
             }
             let (num, looped) = parse_tape_header(line, lineno)?;
             current_tape_num = Some(num);
             current_looped = looped;
             current_entries = Vec::new();
+            current_comments = Vec::new();
+            current_inline_comments = Vec::new();
             continue;
         }
 
@@ -206,13 +228,21 @@ pub fn parse_tape_content(content: &str) -> Result<Vec<(usize, Tape)>, String> {
         }
 
         // parse entries from this line (may have multiple whitespace-separated tokens)
+        let entry_idx = current_entries.len();
         let entries = parse_line_entries(line, lineno)?;
-        current_entries.extend(entries);
+        if !entries.is_empty() {
+            if let Some(c) = maybe_inline {
+                current_inline_comments.push((entry_idx, c));
+            }
+            current_entries.extend(entries);
+        }
     }
 
     if let Some(num) = current_tape_num {
         let entries = std::mem::take(&mut current_entries);
-        tapes.push((num, Tape::new(entries, current_looped)));
+        let comments = std::mem::take(&mut current_comments);
+        let inline_comments = std::mem::take(&mut current_inline_comments);
+        tapes.push((num, Tape::new(entries, comments, inline_comments, current_looped)));
     }
 
     Ok(tapes)
