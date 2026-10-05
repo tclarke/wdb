@@ -1389,14 +1389,18 @@ fn run_fzf_and_load(
     app: &mut App,
     target: Option<usize>,
 ) -> Result<(), Box<dyn Error>> {
+    // Disable raw mode so fzf can manage the terminal itself.
+    // Stay in the alternate screen — fzf --height draws over the bottom of it.
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
     let result = std::process::Command::new("fzf")
+        .args(["--height=40%", "--layout=reverse", "--border"])
+        .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
         .output();
 
-    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    // Restore raw mode and force a full redraw over whatever fzf left behind.
     enable_raw_mode()?;
     terminal.clear()?;
 
@@ -1411,7 +1415,7 @@ fn run_fzf_and_load(
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() { app.load_path(&path, target); }
         }
-        Ok(_) => {} // user cancelled fzf (Esc)
+        Ok(_) => {} // user cancelled (Esc)
     }
     Ok(())
 }
