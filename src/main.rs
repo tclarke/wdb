@@ -84,10 +84,9 @@ fn main() {
         match rl.readline("(witch) ") {
             Ok(line) => {
                 let line = line.trim();
-                if line.is_empty() {
-                    continue;
+                if !line.is_empty() {
+                    let _ = rl.add_history_entry(line);
                 }
-                let _ = rl.add_history_entry(line);
                 let output = dbg.execute(line);
                 for out_line in output {
                     print!("{}", out_line);

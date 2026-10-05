@@ -64,10 +64,20 @@ pub struct Breakpoint {
     pub conditions: Vec<Condition>,
 }
 
+#[derive(Clone)]
+enum LastCmd {
+    None,
+    Step,
+    List { tape: usize, next_start: usize, n: usize },
+    Dis { next_start: usize, n: usize },
+}
+
 pub struct Debugger {
     pub machine: Machine,
     breakpoints: Vec<Breakpoint>,
     next_bp_id: usize,
+    autodis: bool,
+    last_cmd: LastCmd,
 }
 
 impl Debugger {
@@ -76,6 +86,8 @@ impl Debugger {
             machine: Machine::new(),
             breakpoints: Vec::new(),
             next_bp_id: 1,
+            autodis: true,
+            last_cmd: LastCmd::None,
         }
     }
 
@@ -83,16 +95,20 @@ impl Debugger {
     pub fn execute(&mut self, line: &str) -> Vec<String> {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.is_empty() {
-            return Vec::new();
+            return self.execute_repeat();
         }
 
         match parts[0] {
             "run" | "r" => self.cmd_run(),
-            "step" | "s" | "next" | "n" => self.cmd_step(),
+            "step" | "s" | "next" | "n" => {
+                self.last_cmd = LastCmd::Step;
+                self.cmd_step()
+            }
             "skip" => self.cmd_skip(),
             "list" | "l" => {
-                let tape_num = parts.get(1).and_then(|s| s.parse().ok());
-                self.cmd_list(tape_num)
+                let default_tape = self.machine.active_tape_num().unwrap_or(1);
+                let (start, n, tape) = parse_list_args(&parts[1..], default_tape);
+                self.cmd_list(start, n, tape)
             }
             "print" | "p" => {
                 if parts.len() < 2 {
@@ -101,8 +117,14 @@ impl Debugger {
                 self.cmd_print(parts[1])
             }
             "dis" => {
-                let n = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(7);
-                self.cmd_dis(n)
+                let (start, n) = parse_dis_args(&parts[1..]);
+                self.cmd_dis(start, n)
+            }
+            "set" => {
+                if parts.len() < 3 {
+                    return vec!["usage: set autodis true|false".to_string()];
+                }
+                self.cmd_set(parts[1], parts[2])
             }
             "load" => {
                 if parts.len() < 2 {
@@ -194,7 +216,12 @@ impl Debugger {
                 return out;
             }
         }
-        out.extend(self.show_position());
+        if self.autodis {
+            let (dis_out, _) = self.dis_lines(None, 1);
+            out.extend(dis_out);
+        } else {
+            out.extend(self.show_position());
+        }
         out
     }
 
@@ -205,40 +232,53 @@ impl Debugger {
         }
     }
 
-    fn cmd_list(&self, tape_num: Option<usize>) -> Vec<String> {
-        let tape_num = tape_num.unwrap_or_else(|| self.machine.active_tape_num().unwrap_or(1));
-        let tape = match self.machine.tape_ref(tape_num) {
-            Some(t) => t,
-            None => return vec![format!("tape {} not loaded or empty", tape_num).red().to_string()],
-        };
-        if tape.entries.is_empty() {
-            return vec![format!("tape {} not loaded or empty", tape_num).red().to_string()];
-        }
-        let cur_pos = self.machine.current_tape_pos();
-        let start = cur_pos.unwrap_or(tape.pos);
-        let mut items: Vec<(String, usize, Option<String>)> = Vec::new();
-        let mut comment_idx = tape.comments.partition_point(|(before, _)| *before < start);
-        for (idx, entry) in tape.entries.iter().enumerate().skip(start).take(20) {
-            while comment_idx < tape.comments.len() && tape.comments[comment_idx].0 == idx {
-                let text = format!("      ; {}", tape.comments[comment_idx].1);
-                items.push((text.dimmed().to_string(), 0, None));
-                comment_idx += 1;
-            }
-            let inline = tape.inline_comments.iter()
-                .find(|(i, _)| *i == idx)
-                .map(|(_, c)| c.clone());
-            let at_cur = cur_pos == Some(idx);
-            let base_plain = format!("{} {:4}: {}", if at_cur { ">" } else { " " }, idx + 1, entry);
-            let plain_len = base_plain.len();
-            let base = if use_color() {
-                let marker = if at_cur { "▶".bright_cyan().bold().to_string() } else { " ".to_string() };
-                format!("{} {}: {}", marker, format!("{:4}", idx + 1).dimmed(), entry)
-            } else {
-                base_plain
+    fn cmd_list(&mut self, start: Option<usize>, n: usize, tape_num: usize) -> Vec<String> {
+        let cur_pos = self.machine.current_tape_pos()
+            .filter(|_| self.machine.active_tape_num() == Some(tape_num));
+
+        let (lines, next_start) = {
+            let tape = match self.machine.tape_ref(tape_num) {
+                Some(t) => t,
+                None => return vec![format!("tape {} not loaded or empty", tape_num).red().to_string()],
             };
-            items.push((base, plain_len, inline));
-        }
-        align_inline_comments(items)
+            if tape.entries.is_empty() {
+                return vec![format!("tape {} not loaded or empty", tape_num).red().to_string()];
+            }
+            let tape_start = start.unwrap_or_else(|| cur_pos.unwrap_or(tape.pos));
+            let mut items: Vec<(String, usize, Option<String>)> = Vec::new();
+            let mut comment_idx = tape.comments.partition_point(|(before, _)| *before < tape_start);
+            let mut entry_count = 0;
+            let mut next_start = tape_start;
+            for (idx, entry) in tape.entries.iter().enumerate().skip(tape_start) {
+                if entry_count >= n {
+                    break;
+                }
+                while comment_idx < tape.comments.len() && tape.comments[comment_idx].0 == idx {
+                    let text = format!("      ; {}", tape.comments[comment_idx].1);
+                    items.push((text.dimmed().to_string(), 0, None));
+                    comment_idx += 1;
+                }
+                let inline = tape.inline_comments.iter()
+                    .find(|(i, _)| *i == idx)
+                    .map(|(_, c)| c.clone());
+                let at_cur = cur_pos == Some(idx);
+                let base_plain = format!("{} {:4}: {}", if at_cur { ">" } else { " " }, idx + 1, entry);
+                let plain_len = base_plain.len();
+                let base = if use_color() {
+                    let marker = if at_cur { "▶".bright_cyan().bold().to_string() } else { " ".to_string() };
+                    format!("{} {}: {}", marker, format!("{:4}", idx + 1).dimmed(), entry)
+                } else {
+                    base_plain
+                };
+                items.push((base, plain_len, inline));
+                entry_count += 1;
+                next_start = idx + 1;
+            }
+            (align_inline_comments(items), next_start)
+        };
+
+        self.last_cmd = LastCmd::List { tape: tape_num, next_start, n };
+        lines
     }
 
     fn cmd_print(&self, loc: &str) -> Vec<String> {
@@ -270,35 +310,52 @@ impl Debugger {
         }
     }
 
-    fn cmd_dis(&self, n: usize) -> Vec<String> {
+    fn dis_lines(&self, start: Option<usize>, n: usize) -> (Vec<String>, usize) {
         let tape_num = self.machine.active_tape_num().unwrap_or(1);
-        let entries = self.machine.peek_tape_entries(tape_num, n * 4 + 10);
-        let inline_comments = self.machine.tape_ref(tape_num).map(|t| t.inline_comments.as_slice()).unwrap_or(&[]);
+        let tape = match self.machine.tape_ref(tape_num) {
+            Some(t) => t,
+            None => return (vec!["no orders at current position".to_string()], 0),
+        };
+        let tape_start = start.unwrap_or_else(|| self.machine.current_tape_pos().unwrap_or(tape.pos));
+        let cur_pos = self.machine.current_tape_pos();
+        let inline_comments = &tape.inline_comments;
         let mut items: Vec<(String, usize, Option<String>)> = Vec::new();
         let mut count = 0;
-        for (idx, entry) in &entries {
+        let mut next_start = tape_start;
+        for (idx, entry) in tape.entries.iter().enumerate().skip(tape_start) {
             if count >= n {
                 break;
             }
             if let TapeEntry::Order(o) = entry {
+                let bp = self.bp_marker(tape_num, idx + 1);
                 let inline = inline_comments.iter()
-                    .find(|(i, _)| i == idx)
+                    .find(|(i, _)| *i == idx)
                     .map(|(_, c)| c.clone());
-                let base_plain = format!("{:4}: {:05}  {}", idx + 1, o, disassemble(*o));
+                let at_cur = cur_pos == Some(idx);
+                let cur_marker = if at_cur { ">" } else { " " };
+                let base_plain = format!("{}{} {:4}: {:05}  {}", bp.plain, cur_marker, idx + 1, o, disassemble(*o));
                 let plain_len = base_plain.len();
                 let base = if use_color() {
-                    format!("{}: {:05}  {}", format!("{:4}", idx + 1).dimmed(), o, disassemble(*o))
+                    let cur_col = if at_cur { "▶".bright_cyan().bold().to_string() } else { " ".to_string() };
+                    format!("{}{} {}: {:05}  {}", bp.colored, cur_col, format!("{:4}", idx + 1).dimmed(), o, disassemble(*o))
                 } else {
                     base_plain
                 };
                 items.push((base, plain_len, inline));
                 count += 1;
+                next_start = idx + 1;
             }
         }
         if items.is_empty() {
-            return vec!["no orders at current position".to_string()];
+            return (vec!["no orders at current position".to_string()], tape_start);
         }
-        align_inline_comments(items)
+        (align_inline_comments(items), next_start)
+    }
+
+    fn cmd_dis(&mut self, start: Option<usize>, n: usize) -> Vec<String> {
+        let (lines, next_start) = self.dis_lines(start, n);
+        self.last_cmd = LastCmd::Dis { next_start, n };
+        lines
     }
 
     fn cmd_load(&mut self, filename: &str, only_tape: Option<usize>) -> Vec<String> {
@@ -640,9 +697,10 @@ impl Debugger {
             ("run / r",                        "run until halt or Ctrl-C"),
             ("step / s / next / n",            "execute one order"),
             ("skip",                           "advance tape without executing"),
-            ("list [tape]",                    "show tape from current position"),
+            ("list [L:N] [tape]",              "show N entries from line L (default: 4 from current)"),
             ("print <loc>",                    "store 10-99, acc, sign, layout, shift"),
-            ("dis [n]",                        "disassemble next n orders (default 7)"),
+            ("dis [L:N]",                      "disassemble N orders from line L (default: 4 from current)"),
+            ("set autodis true|false",         "auto-disassemble next instruction after step"),
             ("load <file> [tape]",             "load tape file"),
             ("reset",                          "reset machine, keep tapes"),
             ("clear [tape]",                   "unload tape(s)"),
@@ -660,6 +718,7 @@ impl Debugger {
             ("dump tapes",                     "dump all loaded tape contents"),
             ("dump tapes dis",                 "dump tapes with disassembly"),
             ("quit / exit / q",                "exit"),
+            ("<Enter>",                        "repeat last step/list/dis"),
         ];
         let width = cmds.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
         let mut out = vec!["Commands:".to_string()];
@@ -667,6 +726,36 @@ impl Debugger {
             out.push(format!("  {:<width$}  {}", cmd, desc, width = width));
         }
         out
+    }
+
+    fn execute_repeat(&mut self) -> Vec<String> {
+        match self.last_cmd.clone() {
+            LastCmd::None => Vec::new(),
+            LastCmd::Step => self.cmd_step(),
+            LastCmd::List { tape, next_start, n } => self.cmd_list(Some(next_start), n, tape),
+            LastCmd::Dis { next_start, n } => self.cmd_dis(Some(next_start), n),
+        }
+    }
+
+    fn cmd_set(&mut self, key: &str, val: &str) -> Vec<String> {
+        match key {
+            "autodis" => match val {
+                "true" | "on" | "1" => { self.autodis = true; vec!["autodis on".to_string()] }
+                "false" | "off" | "0" => { self.autodis = false; vec!["autodis off".to_string()] }
+                _ => vec![format!("invalid value '{}' (use true/false)", val)],
+            },
+            _ => vec![format!("unknown setting '{}' (use: autodis)", key)],
+        }
+    }
+
+    fn bp_marker(&self, tape_num: usize, line_1indexed: usize) -> BpMarker {
+        let bp = self.breakpoints.iter().find(|b| b.tape == tape_num && matches!(b.kind, BpKind::Line(n) if n == line_1indexed));
+        match bp {
+            None => BpMarker { plain: " ", colored: " ".to_string() },
+            Some(b) if !b.enabled => BpMarker { plain: "-", colored: "○".dimmed().to_string() },
+            Some(b) if !b.conditions.is_empty() => BpMarker { plain: "c", colored: "◆".yellow().to_string() },
+            Some(_) => BpMarker { plain: "*", colored: "●".bright_red().to_string() },
+        }
     }
 
     fn show_position(&self) -> Vec<String> {
@@ -752,6 +841,39 @@ fn format_output(o: Output) -> Vec<String> {
     match o {
         Output::Print(dst, s) => vec![format!("{}{} ", format!("{:02}", dst).dimmed(), pipe.dimmed()) + &s],
         Output::Perforate(dst, s) => vec![format!("{}{} ", format!("{:02}", dst).dimmed(), pipe.dimmed()) + &s],
+    }
+}
+
+struct BpMarker { plain: &'static str, colored: String }
+
+fn parse_list_args(args: &[&str], default_tape: usize) -> (Option<usize>, usize, usize) {
+    if args.is_empty() {
+        return (None, 4, default_tape);
+    }
+    if let Some((l_str, n_str)) = args[0].split_once(':') {
+        let start = l_str.parse::<usize>().ok().map(|n| n.saturating_sub(1));
+        let n = if n_str.is_empty() { 4 } else { n_str.parse().unwrap_or(4) };
+        let tape = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(default_tape);
+        (start, n, tape)
+    } else if let Ok(tape) = args[0].parse::<usize>() {
+        (None, 4, tape)
+    } else {
+        (None, 4, default_tape)
+    }
+}
+
+fn parse_dis_args(args: &[&str]) -> (Option<usize>, usize) {
+    if args.is_empty() {
+        return (None, 4);
+    }
+    if let Some((l_str, n_str)) = args[0].split_once(':') {
+        let start = l_str.parse::<usize>().ok().map(|n| n.saturating_sub(1));
+        let n = if n_str.is_empty() { 4 } else { n_str.parse().unwrap_or(4) };
+        (start, n)
+    } else if let Ok(n) = args[0].parse::<usize>() {
+        (None, n)
+    } else {
+        (None, 4)
     }
 }
 
