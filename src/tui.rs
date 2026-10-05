@@ -73,6 +73,14 @@ struct App {
     // load prompt: Some(Some(tape_idx)) = load into tape, Some(None) = load all
     load_prompt: Option<Option<usize>>,
     load_prompt_buf: String,
+    // active completion cycling (Tab/Shift+Tab in load prompt)
+    load_compl: Option<LoadCompl>,
+}
+
+struct LoadCompl {
+    candidates: Vec<String>, // just filenames
+    dir: String,             // path prefix including trailing slash (or "" for cwd)
+    idx: usize,
 }
 
 impl App {
@@ -101,6 +109,7 @@ impl App {
             tape_visible: [false; 7],
             load_prompt: None,
             load_prompt_buf: String::new(),
+            load_compl: None,
         }
     }
 
@@ -164,16 +173,27 @@ impl App {
         (0..7).filter(|&i| self.tape_visible[i]).collect()
     }
 
-    fn cycle_focus(&mut self) {
+    fn focus_panes(&self) -> Vec<Focus> {
         let visible = self.visible_tapes();
-        // build ordered pane list based on what's shown
         let mut panes: Vec<Focus> = visible.iter().map(|&i| Focus::Tape(i)).collect();
-        if self.show_state { panes.push(Focus::State); }
-        if self.show_dis   { panes.push(Focus::Dis); }
+        if self.show_state  { panes.push(Focus::State); }
+        if self.show_dis    { panes.push(Focus::Dis); }
         if self.show_output { panes.push(Focus::Log); }
+        panes
+    }
+
+    fn cycle_focus(&mut self) {
+        let panes = self.focus_panes();
         if panes.is_empty() { return; }
-        let cur_pos = panes.iter().position(|p| p == &self.focus).unwrap_or(0);
-        self.focus = panes[(cur_pos + 1) % panes.len()].clone();
+        let cur = panes.iter().position(|p| p == &self.focus).unwrap_or(0);
+        self.focus = panes[(cur + 1) % panes.len()].clone();
+    }
+
+    fn cycle_focus_backward(&mut self) {
+        let panes = self.focus_panes();
+        if panes.is_empty() { return; }
+        let cur = panes.iter().position(|p| p == &self.focus).unwrap_or(0);
+        self.focus = panes[(cur + panes.len() - 1) % panes.len()].clone();
     }
 
     fn scroll_left(&mut self) {
@@ -468,6 +488,7 @@ impl App {
             }
             KeyCode::Char('D') => self.show_dis = !self.show_dis,
             KeyCode::Tab => self.cycle_focus(),
+            KeyCode::BackTab => self.cycle_focus_backward(),
             KeyCode::Up | KeyCode::Char('k') => self.scroll_up(),
             KeyCode::Down | KeyCode::Char('j') => self.scroll_down(),
             KeyCode::Left => self.scroll_left(),
@@ -583,16 +604,18 @@ impl App {
             KeyCode::Esc => {
                 self.load_prompt = None;
                 self.load_prompt_buf.clear();
+                self.load_compl = None;
             }
             KeyCode::Tab | KeyCode::Char('\t') => {
-                let (completed, candidates) = tab_complete_path(&self.load_prompt_buf);
-                if let Some(new_buf) = completed {
-                    self.load_prompt_buf = new_buf;
-                } else if !candidates.is_empty() {
-                    self.push_log(candidates.join("  "));
-                }
+                self.compl_step(1);
             }
-            KeyCode::Backspace => { self.load_prompt_buf.pop(); }
+            KeyCode::BackTab => {
+                self.compl_step(-1);
+            }
+            KeyCode::Backspace => {
+                self.load_compl = None;
+                self.load_prompt_buf.pop();
+            }
             KeyCode::Enter => {
                 let path = self.load_prompt_buf.trim().to_string();
                 let target = self.load_prompt.take();
@@ -620,10 +643,47 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char(c) => self.load_prompt_buf.push(c),
+            KeyCode::Char(c) => {
+                self.load_compl = None;
+                self.load_prompt_buf.push(c);
+            }
             _ => {}
         }
         false
+    }
+
+    fn compl_step(&mut self, delta: i32) {
+        use std::path::Path;
+        if let Some(ref mut c) = self.load_compl {
+            // already cycling — advance
+            let n = c.candidates.len();
+            c.idx = ((c.idx as i64 + delta as i64).rem_euclid(n as i64)) as usize;
+            let name = &c.candidates[c.idx];
+            let path = format!("{}{}", c.dir, name);
+            self.load_prompt_buf = if Path::new(&path).is_dir() {
+                format!("{}/", path)
+            } else {
+                path
+            };
+        } else {
+            // first tab — run completion
+            let (completed, candidates, dir) = tab_complete_path(&self.load_prompt_buf);
+            if let Some(new_buf) = completed {
+                // unique or common-prefix advance: apply and don't enter cycling
+                self.load_prompt_buf = new_buf;
+            } else if !candidates.is_empty() {
+                // ambiguous: enter cycling, start at idx 0 (or last if backward)
+                let idx = if delta < 0 { candidates.len() - 1 } else { 0 };
+                let name = &candidates[idx];
+                let path = format!("{}{}", dir, name);
+                self.load_prompt_buf = if Path::new(&path).is_dir() {
+                    format!("{}/", path)
+                } else {
+                    path
+                };
+                self.load_compl = Some(LoadCompl { candidates, dir, idx });
+            }
+        }
     }
 
     fn handle_edit_event(&mut self, ev: Event) -> bool {
@@ -747,9 +807,11 @@ enum TapeRow {
     },
 }
 
-/// Returns (completed_buf, candidates).
-/// completed_buf is Some when the buf can be extended; candidates is the full match list.
-fn tab_complete_path(buf: &str) -> (Option<String>, Vec<String>) {
+/// Returns (completed_buf, candidates, dir_prefix).
+/// completed_buf = Some when there is a unique or common-prefix completion.
+/// candidates = all matching filenames (for cycling).
+/// dir_prefix = the "dir/" string to prepend to candidates when cycling.
+fn tab_complete_path(buf: &str) -> (Option<String>, Vec<String>, String) {
     use std::path::Path;
     let (dir_part, file_prefix): (&str, &str) = if buf.ends_with('/') {
         (buf, "")
@@ -760,7 +822,7 @@ fn tab_complete_path(buf: &str) -> (Option<String>, Vec<String>) {
         (dir, name)
     };
     let dir_search = if dir_part.is_empty() { "." } else { dir_part };
-    let Ok(rd) = std::fs::read_dir(dir_search) else { return (None, vec![]); };
+    let Ok(rd) = std::fs::read_dir(dir_search) else { return (None, vec![], String::new()); };
     let mut matches: Vec<String> = rd
         .filter_map(|e| e.ok())
         .filter_map(|e| {
@@ -769,7 +831,15 @@ fn tab_complete_path(buf: &str) -> (Option<String>, Vec<String>) {
         })
         .collect();
     matches.sort();
-    if matches.is_empty() { return (None, vec![]); }
+
+    // build the dir prefix used when constructing full paths for cycling
+    let dir_prefix = if dir_part == "." && !buf.contains('/') {
+        String::new()
+    } else {
+        format!("{}/", dir_part.trim_end_matches('/'))
+    };
+
+    if matches.is_empty() { return (None, vec![], dir_prefix); }
 
     // common prefix of all matches
     let first = &matches[0];
@@ -780,22 +850,20 @@ fn tab_complete_path(buf: &str) -> (Option<String>, Vec<String>) {
             if a != b { len = len.min(i); break; }
         }
     }
-    // if no progress beyond what's already typed, return candidates only
-    if len <= file_prefix.len() { return (None, matches); }
+
+    if len <= file_prefix.len() {
+        // no prefix progress — return candidates for cycling
+        return (None, matches, dir_prefix);
+    }
 
     let completed_name = first[..len].to_string();
-    let new_path = if (dir_part == "." && !buf.contains('/')) || dir_part.is_empty() {
-        completed_name.clone()
-    } else {
-        format!("{}/{}", dir_part.trim_end_matches('/'), completed_name)
-    };
-    // trailing slash for unique directory
+    let new_path = format!("{}{}", dir_prefix, completed_name);
     let new_path = if matches.len() == 1 && Path::new(&new_path).is_dir() {
         format!("{}/", new_path)
     } else {
         new_path
     };
-    (Some(new_path), matches)
+    (Some(new_path), matches, dir_prefix)
 }
 
 fn parse_tape_entry_str(s: &str) -> Result<TapeEntry, String> {
