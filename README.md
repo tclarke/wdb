@@ -5,7 +5,7 @@ GDB-style debugger and simulator for the [WITCH computer](https://en.wikipedia.o
 ## Quick start
 
 ```sh
-cargo install wdb
+cargo install wdb-witch
 wdb program.tape          # load and reset, enter interactive debugger
 wdb --batch program.tape  # run non-interactively and exit
 # or

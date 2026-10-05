@@ -1,5 +1,5 @@
 [package]
-name = "wdb"
+name = "wdb-witch"
 version = "1.0.0"
 edition = "2024"
 description = "GDB-style debugger and simulator for the WITCH computer (1951)"
@@ -8,6 +8,10 @@ repository = "https://github.com/tclarke/wdb"
 keywords = ["witch", "debugger", "simulator", "retro", "computer"]
 categories = ["command-line-utilities", "simulation", "development-tools::debugging"]
 readme = "README.md"
+
+[[bin]]
+name = "wdb"
+path = "src/main.rs"
 
 [dependencies]
 ctrlc = "3.5.2"
