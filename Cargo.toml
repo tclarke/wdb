@@ -1,0 +1,14 @@
+[package]
+name = "wdb"
+version = "0.1.0"
+edition = "2024"
+description = "GDB-style debugger and simulator for the WITCH computer (1951)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tclarke/wdb"
+keywords = ["witch", "debugger", "simulator", "retro", "computer"]
+categories = ["command-line-utilities", "simulation", "development-tools::debugging"]
+readme = "README.md"
+
+[dependencies]
+ctrlc = "3.5.2"
+rustyline = "18.0.1"
