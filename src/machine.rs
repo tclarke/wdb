@@ -150,17 +150,15 @@ impl Machine {
         let result = self.execute_order(order);
         // sync IP.pos from tape.pos — needed when data was consumed from the
         // active execution tape (e.g. input order reads from same tape as instructions)
-        if let IP::Tape { reader, ref mut pos } = self.ip {
-            if let Some(tape) = &self.tapes[reader] {
+        if let IP::Tape { reader, ref mut pos } = self.ip
+            && let Some(tape) = &self.tapes[reader] {
                 *pos = tape.pos;
             }
-        }
-        if let Err(ref reason) = result {
-            if !self.halted {
+        if let Err(ref reason) = result
+            && !self.halted {
                 self.halted = true;
                 self.halt_reason = Some(reason.clone());
             }
-        }
         result
     }
 
@@ -461,11 +459,8 @@ impl Machine {
             }
             _ if second == 5 => {
                 let block = third as u8;
-                match self.sign_flag {
-                    Some(true) => {
-                        self.do_search(block, dst)?;
-                    }
-                    _ => {}
+                if let Some(true) = self.sign_flag {
+                    self.do_search(block, dst)?;
                 }
                 Ok(Vec::new())
             }
@@ -527,11 +522,10 @@ impl Machine {
             return Err(HaltReason::TapeExhausted(reader as usize));
         }
 
-        if let IP::Tape { reader: cur_r, pos } = &mut self.ip {
-            if *cur_r == r {
+        if let IP::Tape { reader: cur_r, pos } = &mut self.ip
+            && *cur_r == r {
                 *pos = self.tapes[r].as_ref().map(|t| t.pos).unwrap_or(0);
             }
-        }
 
         Ok(())
     }
@@ -543,11 +537,11 @@ impl Machine {
         match addr {
             0 => Ok(random_roundoff()),
             8 => {
-                let low7 = (self.acc.magnitude % 10_000_000) as u64;
+                let low7 = self.acc.magnitude % 10_000_000;
                 Ok(WitchNum::new(low7, self.acc.negative))
             }
             9 => {
-                let high8 = (self.acc.magnitude / 100_000_000) as u64;
+                let high8 = self.acc.magnitude / 100_000_000;
                 Ok(WitchNum::new(high8, self.acc.negative))
             }
             10..=99 => Ok(self.stores[(addr - 10) as usize]),
@@ -588,7 +582,7 @@ impl Machine {
         match addr {
             9 => {
                 // Add into whole acc: read high 8 digits of acc
-                let high8 = (self.acc.magnitude / 100_000_000) as u64;
+                let high8 = self.acc.magnitude / 100_000_000;
                 Ok(WitchNum::new(high8, self.acc.negative))
             }
             _ => self.read_addr(addr),
@@ -599,11 +593,11 @@ impl Machine {
     fn read_store_or_acc(&self, addr: u8) -> Result<WitchNum, HaltReason> {
         match addr {
             8 => {
-                let low7 = (self.acc.magnitude % 10_000_000) as u64;
+                let low7 = self.acc.magnitude % 10_000_000;
                 Ok(WitchNum::new(low7, self.acc.negative))
             }
             9 => {
-                let high8 = (self.acc.magnitude / 100_000_000) as u64;
+                let high8 = self.acc.magnitude / 100_000_000;
                 Ok(WitchNum::new(high8, self.acc.negative))
             }
             10..=99 => Ok(self.stores[(addr - 10) as usize]),
@@ -632,7 +626,7 @@ impl Machine {
             }
             9 => {
                 // Write whole acc: val goes into high 8 digits, low 8 cleared
-                self.acc.magnitude = val.magnitude as u64 * 100_000_000;
+                self.acc.magnitude = val.magnitude * 100_000_000;
                 self.acc.negative = val.negative;
                 Ok(Vec::new())
             }
@@ -697,6 +691,12 @@ impl Machine {
             tape.pos
         };
         tape.entries.iter().enumerate().skip(start).take(count).collect()
+    }
+}
+
+impl Default for Machine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

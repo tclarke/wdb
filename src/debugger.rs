@@ -222,12 +222,11 @@ impl Debugger {
                 }
             })],
             s => {
-                if let Ok(addr) = s.parse::<u8>() {
-                    if (10..=99).contains(&addr) {
+                if let Ok(addr) = s.parse::<u8>()
+                    && (10..=99).contains(&addr) {
                         let val = self.machine.stores[(addr - 10) as usize];
                         return vec![format!("store {} = {}", addr, val)];
                     }
-                }
                 vec![format!("unknown: '{}' (use store 10-99, acc, sign, layout, shift)", s)]
             }
         }
@@ -258,11 +257,10 @@ impl Debugger {
             Ok(tapes) => {
                 let mut loaded = Vec::new();
                 for (num, tape) in tapes {
-                    if let Some(only) = only_tape {
-                        if num != only {
+                    if let Some(only) = only_tape
+                        && num != only {
                             continue;
                         }
-                    }
                     let entry_count = tape.entries.len();
                     self.machine.load_tape(num, tape);
                     loaded.push(format!("loaded tape {} ({} entries) from {}", num, entry_count, filename));
@@ -314,7 +312,7 @@ impl Debugger {
             Ok(n) if (1..=7).contains(&n) => n,
             _ => return vec![format!("invalid tape number '{}' (must be 1-7)", tape_str)],
         };
-        let order = 2 * 10000 + 1 * 1000 + n as u32; // 021rr
+        let order = 2 * 10000 + 1000 + n as u32; // 021rr
         match self.machine.exec_single(order) {
             Ok(_) => {
                 vec![format!("transferred to tape {}", n)]

@@ -75,11 +75,11 @@ impl WitchAcc {
     pub const NEG_ZERO: WitchAcc = WitchAcc { magnitude: 0, negative: true };
 
     pub fn from_witch_num(n: WitchNum) -> Self {
-        WitchAcc { magnitude: n.magnitude as u64, negative: n.negative }
+        WitchAcc { magnitude: n.magnitude, negative: n.negative }
     }
 
     pub fn to_witch_num(self) -> WitchNum {
-        WitchNum { magnitude: (self.magnitude % 100_000_000) as u64, negative: self.negative }
+        WitchNum { magnitude: (self.magnitude % 100_000_000), negative: self.negative }
     }
 
     pub fn is_pos_zero(self) -> bool {
@@ -228,7 +228,7 @@ fn parse_tape_header(line: &str, lineno: usize) -> Result<(usize, bool), String>
     let num: usize = num_str
         .parse()
         .map_err(|_| format!("line {}: bad tape number '{}'", lineno, num_str))?;
-    if num < 1 || num > 7 {
+    if !(1..=7).contains(&num) {
         return Err(format!("line {}: tape number {} out of range 1-7", lineno, num));
     }
     let kind = &rest[paren + 1..];
