@@ -212,17 +212,28 @@ impl App {
     }
 
     fn toggle_bp(&mut self) {
-        let tape_idx = match self.focus {
-            Focus::Tape(i) => i,
+        let (tape_num, line_1indexed) = match self.focus {
+            Focus::Tape(i) => {
+                let cursor = self.tape_cursor[i];
+                let entry_idx = match display_row_to_entry(&self.debugger.machine, i, cursor) {
+                    Some(idx) => idx,
+                    None => return,
+                };
+                (i + 1, entry_idx + 1)
+            }
+            Focus::Dis => {
+                let tape_num = match self.debugger.machine.active_tape_num() {
+                    Some(n) => n,
+                    None => return,
+                };
+                let pos = match self.debugger.machine.current_tape_pos() {
+                    Some(p) => p,
+                    None => return,
+                };
+                (tape_num, pos + 1)
+            }
             _ => return,
         };
-        let cursor = self.tape_cursor[tape_idx];
-        let tape_num = tape_idx + 1;
-        let entry_idx = match display_row_to_entry(&self.debugger.machine, tape_idx, cursor) {
-            Some(i) => i,
-            None => return,
-        };
-        let line_1indexed = entry_idx + 1;
         // check if bp already exists
         let existing = self.debugger.breakpoints().iter().find(|b| {
             b.tape == tape_num && matches!(b.kind, BpKind::Line(n) if n == line_1indexed)
