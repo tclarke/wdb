@@ -21,6 +21,7 @@ fn main() {
         println!("Usage: wdb [--batch] [--tui] [--color|--no-color] [tape-file]");
         println!("  --version, -V  Print version");
         println!("  --help, -h     Print this help");
+        println!("  --tui          Launch text user interface");
         println!("  --batch        Run tape non-interactively and exit");
         println!("  --color        Force color output");
         println!("  --no-color     Disable color output");
