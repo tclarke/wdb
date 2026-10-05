@@ -75,6 +75,8 @@ struct App {
     load_prompt_buf: String,
     // active completion cycling (Tab/Shift+Tab in load prompt)
     load_compl: Option<LoadCompl>,
+    // set to trigger fzf selection in the event loop (where terminal access is available)
+    fzf_request: Option<Option<usize>>,
 }
 
 struct LoadCompl {
@@ -110,6 +112,7 @@ impl App {
             load_prompt: None,
             load_prompt_buf: String::new(),
             load_compl: None,
+            fzf_request: None,
         }
     }
 
@@ -569,12 +572,10 @@ impl App {
                     Focus::Tape(i) => i,
                     _ => self.visible_tapes().first().copied().unwrap_or(0),
                 };
-                self.load_prompt = Some(Some(tape_idx));
-                self.load_prompt_buf.clear();
+                self.fzf_request = Some(Some(tape_idx));
             }
             KeyCode::Char('L') => {
-                self.load_prompt = Some(None);
-                self.load_prompt_buf.clear();
+                self.fzf_request = Some(None);
             }
             // unload tape(s)
             KeyCode::Char('u') => {
@@ -621,26 +622,7 @@ impl App {
                 let target = self.load_prompt.take();
                 self.load_prompt_buf.clear();
                 if !path.is_empty() {
-                    match target {
-                        Some(Some(tape_idx)) => {
-                            let tape_num = tape_idx + 1;
-                            let outs = self.debugger.execute(&format!("load {} {}", path, tape_num));
-                            for l in outs { self.push_log(l); }
-                            if self.debugger.machine.tapes[tape_idx].is_some() {
-                                self.tape_visible[tape_idx] = true;
-                            }
-                        }
-                        Some(None) => {
-                            let outs = self.debugger.execute(&format!("load {}", path));
-                            for l in outs { self.push_log(l); }
-                            for i in 0..7 {
-                                if self.debugger.machine.tapes[i].is_some() {
-                                    self.tape_visible[i] = true;
-                                }
-                            }
-                        }
-                        None => {}
-                    }
+                    if let Some(t) = target { self.load_path(&path, t); }
                 }
             }
             KeyCode::Char(c) => {
@@ -650,6 +632,25 @@ impl App {
             _ => {}
         }
         false
+    }
+
+    fn load_path(&mut self, path: &str, target: Option<usize>) {
+        match target {
+            Some(tape_idx) => {
+                let outs = self.debugger.execute(&format!("load {} {}", path, tape_idx + 1));
+                for l in outs { self.push_log(l); }
+                if self.debugger.machine.tapes[tape_idx].is_some() {
+                    self.tape_visible[tape_idx] = true;
+                }
+            }
+            None => {
+                let outs = self.debugger.execute(&format!("load {}", path));
+                for l in outs { self.push_log(l); }
+                for i in 0..7 {
+                    if self.debugger.machine.tapes[i].is_some() { self.tape_visible[i] = true; }
+                }
+            }
+        }
     }
 
     fn compl_step(&mut self, delta: i32) {
@@ -1383,6 +1384,38 @@ pub fn run_tui(debugger: Debugger) -> Result<(), Box<dyn Error>> {
     result
 }
 
+fn run_fzf_and_load(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    target: Option<usize>,
+) -> Result<(), Box<dyn Error>> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+
+    let result = std::process::Command::new("fzf")
+        .stdout(std::process::Stdio::piped())
+        .output();
+
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    enable_raw_mode()?;
+    terminal.clear()?;
+
+    match result {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // fzf not installed — fall back to text prompt
+            app.load_prompt = Some(target);
+            app.load_prompt_buf.clear();
+        }
+        Err(e) => return Err(Box::new(e)),
+        Ok(output) if output.status.success() => {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() { app.load_path(&path, target); }
+        }
+        Ok(_) => {} // user cancelled fzf (Esc)
+    }
+    Ok(())
+}
+
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
@@ -1392,6 +1425,14 @@ fn event_loop(
         sync_tape_cursors(app);
 
         terminal.draw(|f| render(f, app))?;
+
+        // fzf selection (must happen outside draw, with terminal access)
+        if let Some(target) = app.fzf_request.take() {
+            if let Err(e) = run_fzf_and_load(terminal, app, target) {
+                app.push_log(format!("fzf error: {}", e));
+            }
+            continue;
+        }
 
         if app.running && !app.debugger.machine.halted {
             for _ in 0..STEPS_PER_TICK {
