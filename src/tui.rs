@@ -584,9 +584,12 @@ impl App {
                 self.load_prompt = None;
                 self.load_prompt_buf.clear();
             }
-            KeyCode::Tab => {
-                if let Some(completed) = tab_complete_path(&self.load_prompt_buf) {
-                    self.load_prompt_buf = completed;
+            KeyCode::Tab | KeyCode::Char('\t') => {
+                let (completed, candidates) = tab_complete_path(&self.load_prompt_buf);
+                if let Some(new_buf) = completed {
+                    self.load_prompt_buf = new_buf;
+                } else if !candidates.is_empty() {
+                    self.push_log(candidates.join("  "));
                 }
             }
             KeyCode::Backspace => { self.load_prompt_buf.pop(); }
@@ -744,7 +747,9 @@ enum TapeRow {
     },
 }
 
-fn tab_complete_path(buf: &str) -> Option<String> {
+/// Returns (completed_buf, candidates).
+/// completed_buf is Some when the buf can be extended; candidates is the full match list.
+fn tab_complete_path(buf: &str) -> (Option<String>, Vec<String>) {
     use std::path::Path;
     let (dir_part, file_prefix): (&str, &str) = if buf.ends_with('/') {
         (buf, "")
@@ -755,39 +760,42 @@ fn tab_complete_path(buf: &str) -> Option<String> {
         (dir, name)
     };
     let dir_search = if dir_part.is_empty() { "." } else { dir_part };
-    let mut matches: Vec<String> = std::fs::read_dir(dir_search).ok()?
+    let Ok(rd) = std::fs::read_dir(dir_search) else { return (None, vec![]); };
+    let mut matches: Vec<String> = rd
         .filter_map(|e| e.ok())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|name| name.starts_with(file_prefix))
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if name.starts_with(file_prefix) { Some(name) } else { None }
+        })
         .collect();
     matches.sort();
-    if matches.is_empty() { return None; }
-    // find common prefix of matches
-    let completed = if matches.len() == 1 {
-        matches[0].clone()
-    } else {
-        let first = &matches[0];
-        let mut len = first.len();
-        for s in &matches[1..] {
-            len = len.min(s.len());
-            for (i, (a, b)) in first.bytes().zip(s.bytes()).enumerate() {
-                if a != b { len = len.min(i); break; }
-            }
+    if matches.is_empty() { return (None, vec![]); }
+
+    // common prefix of all matches
+    let first = &matches[0];
+    let mut len = first.len();
+    for s in &matches[1..] {
+        len = len.min(s.len());
+        for (i, (a, b)) in first.bytes().zip(s.bytes()).enumerate() {
+            if a != b { len = len.min(i); break; }
         }
-        if len <= file_prefix.len() { return None; }
-        first[..len].to_string()
-    };
-    let new_path = if (dir_part == "." && !buf.contains('/')) || dir_part.is_empty() {
-        completed.clone()
-    } else {
-        format!("{}/{}", dir_part.trim_end_matches('/'), completed)
-    };
-    // append trailing slash for unique directory match
-    if matches.len() == 1 && Path::new(&new_path).is_dir() {
-        Some(format!("{}/", new_path))
-    } else {
-        Some(new_path)
     }
+    // if no progress beyond what's already typed, return candidates only
+    if len <= file_prefix.len() { return (None, matches); }
+
+    let completed_name = first[..len].to_string();
+    let new_path = if (dir_part == "." && !buf.contains('/')) || dir_part.is_empty() {
+        completed_name.clone()
+    } else {
+        format!("{}/{}", dir_part.trim_end_matches('/'), completed_name)
+    };
+    // trailing slash for unique directory
+    let new_path = if matches.len() == 1 && Path::new(&new_path).is_dir() {
+        format!("{}/", new_path)
+    } else {
+        new_path
+    };
+    (Some(new_path), matches)
 }
 
 fn parse_tape_entry_str(s: &str) -> Result<TapeEntry, String> {
