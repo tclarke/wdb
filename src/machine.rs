@@ -7,8 +7,8 @@ use std::fmt;
 pub enum HaltReason {
     Finish,
     Signal,
-    Overflow,
-    DivideByPosZero,
+    Overflow(u8, u8),
+    DivideByPosZero(Option<u8>),
     ConditionalJumpNoTest,
     TapeExhausted(usize),
     TapeNotLoaded(usize),
@@ -23,8 +23,9 @@ impl fmt::Display for HaltReason {
         match self {
             HaltReason::Finish => write!(f, "FINISH"),
             HaltReason::Signal => write!(f, "SIGNAL"),
-            HaltReason::Overflow => write!(f, "OVERFLOW: result magnitude >= 10"),
-            HaltReason::DivideByPosZero => write!(f, "DIVIDE BY +0"),
+            HaltReason::Overflow(src, dst) => write!(f, "OVERFLOW: result magnitude >= 10^8 (src={:02}, dst={:02})", src, dst),
+            HaltReason::DivideByPosZero(None) => write!(f, "DIVIDE BY +0: accumulator was +0"),
+            HaltReason::DivideByPosZero(Some(addr)) => write!(f, "DIVIDE BY ZERO: store {:02} was zero", addr),
             HaltReason::ConditionalJumpNoTest => write!(f, "CONDITIONAL JUMP: no prior sign test"),
             HaltReason::TapeExhausted(n) => write!(f, "TAPE {} EXHAUSTED (end reached)", n),
             HaltReason::TapeNotLoaded(n) => write!(f, "TAPE {} NOT LOADED", n),
@@ -256,7 +257,7 @@ impl Machine {
             shifted
         } else {
             let dst_val = self.read_addr_for_add(dst)?;
-            decimal_add(dst_val, shifted, subtract)?
+            decimal_add(dst_val, shifted, subtract).map_err(|_| HaltReason::Overflow(src, dst))?
         };
 
         if clear_src && src >= 10 {
@@ -288,8 +289,8 @@ impl Machine {
         let new_acc = acc_val + prod_acc;
         if new_acc.unsigned_abs() > 9_999_999_999_999_999 {
             self.halted = true;
-            self.halt_reason = Some(HaltReason::Overflow);
-            return Err(HaltReason::Overflow);
+            self.halt_reason = Some(HaltReason::Overflow(src, dst));
+            return Err(HaltReason::Overflow(src, dst));
         }
         self.acc = WitchAcc { magnitude: new_acc.unsigned_abs(), negative: new_acc < 0 };
 
@@ -307,15 +308,15 @@ impl Machine {
 
         if self.acc.is_pos_zero() {
             self.halted = true;
-            self.halt_reason = Some(HaltReason::DivideByPosZero);
-            return Err(HaltReason::DivideByPosZero);
+            self.halt_reason = Some(HaltReason::DivideByPosZero(None));
+            return Err(HaltReason::DivideByPosZero(None));
         }
 
         let divisor = self.stores[(src - 10) as usize].to_i64();
         if divisor == 0 {
             self.halted = true;
-            self.halt_reason = Some(HaltReason::DivideByPosZero);
-            return Err(HaltReason::DivideByPosZero);
+            self.halt_reason = Some(HaltReason::DivideByPosZero(Some(src)));
+            return Err(HaltReason::DivideByPosZero(Some(src)));
         }
 
         // acc is dividend (at 10^-7 scale), divisor at 10^-7 scale.
@@ -336,16 +337,16 @@ impl Machine {
         let quot_mag = quotient.unsigned_abs();
         if quot_mag >= 100_000_000 {
             self.halted = true;
-            self.halt_reason = Some(HaltReason::Overflow);
-            return Err(HaltReason::Overflow);
+            self.halt_reason = Some(HaltReason::Overflow(src, dst));
+            return Err(HaltReason::Overflow(src, dst));
         }
 
         let dst_val = self.stores[(dst - 10) as usize].to_i64();
         let new_dst = dst_val + quotient as i64;
         if new_dst.unsigned_abs() >= 100_000_000 {
             self.halted = true;
-            self.halt_reason = Some(HaltReason::Overflow);
-            return Err(HaltReason::Overflow);
+            self.halt_reason = Some(HaltReason::Overflow(src, dst));
+            return Err(HaltReason::Overflow(src, dst));
         }
         self.stores[(dst - 10) as usize] = WitchNum::from_i64(new_dst);
 
@@ -380,7 +381,7 @@ impl Machine {
         // So in both cases dst += |src| = dst += abs(src). Yes, always add the magnitude.
         let abs_shifted = WitchNum::new(shifted.magnitude, false);
         // But the subtract flag is false (always add the magnitude)
-        let result = decimal_add(dst_val, abs_shifted, false)?;
+        let result = decimal_add(dst_val, abs_shifted, false).map_err(|_| HaltReason::Overflow(src, dst))?;
         self.write_addr(dst, result)
     }
 
@@ -675,12 +676,12 @@ impl Machine {
     }
 }
 
-fn decimal_add(dst: WitchNum, src: WitchNum, subtract: bool) -> Result<WitchNum, HaltReason> {
+fn decimal_add(dst: WitchNum, src: WitchNum, subtract: bool) -> Result<WitchNum, ()> {
     let d = dst.to_i64();
     let s = if subtract { -src.to_i64() } else { src.to_i64() };
     let result = d + s;
     if result.unsigned_abs() >= 100_000_000 {
-        return Err(HaltReason::Overflow);
+        return Err(());
     }
     Ok(WitchNum::from_i64(result))
 }
