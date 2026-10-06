@@ -31,6 +31,7 @@ enum Focus {
     State,
     Dis,
     Log,
+    Ref,
 }
 
 #[derive(Clone)]
@@ -64,6 +65,8 @@ struct App {
     show_state: bool,
     show_output: bool,
     show_help: bool,
+    show_ref: bool,
+    ref_page: usize,
     running: bool,
     log: VecDeque<String>,
     // edit mode
@@ -107,6 +110,8 @@ impl App {
             show_state: true,
             show_output: true,
             show_help: false,
+            show_ref: false,
+            ref_page: 0,
             running: false,
             log: VecDeque::with_capacity(LOG_CAP),
             edit: None,
@@ -198,6 +203,7 @@ impl App {
         if self.show_state  { panes.push(Focus::State); }
         if self.show_dis    { panes.push(Focus::Dis); }
         if self.show_output { panes.push(Focus::Log); }
+        if self.show_ref    { panes.push(Focus::Ref); }
         panes
     }
 
@@ -225,6 +231,7 @@ impl App {
             }
             Focus::Dis => self.dis_hscroll = self.dis_hscroll.saturating_sub(4),
             Focus::Log => self.log_hscroll = self.log_hscroll.saturating_sub(4),
+            Focus::Ref => {}
         }
     }
 
@@ -238,6 +245,7 @@ impl App {
             }
             Focus::Dis => self.dis_hscroll += 4,
             Focus::Log => self.log_hscroll += 4,
+            Focus::Ref => {}
         }
     }
 
@@ -259,6 +267,9 @@ impl App {
                 let max = self.log.len().saturating_sub(1);
                 self.log_scroll = (self.log_scroll + 1).min(max);
             }
+            Focus::Ref => {
+                self.ref_page = self.ref_page.saturating_sub(1);
+            }
         }
     }
 
@@ -278,6 +289,9 @@ impl App {
                 if self.log_scroll > 0 {
                     self.log_scroll -= 1;
                 }
+            }
+            Focus::Ref => {
+                self.ref_page = (self.ref_page + 1).min(REF_PAGE_COUNT - 1);
             }
         }
     }
@@ -532,7 +546,7 @@ impl App {
             _ if self.show_help => { self.show_help = false; }
             KeyCode::Char(' ') => {
                 if self.debugger.machine.halted {
-                    self.push_log("halted — use R to reset".to_string());
+                    self.push_log("halted — use r to reset".to_string());
                 } else {
                     self.running = !self.running;
                 }
@@ -541,10 +555,16 @@ impl App {
                 self.running = false;
                 self.do_step_cmd();
             }
-            KeyCode::Char('R') => {
+            KeyCode::Char('r') => {
                 let outs = self.debugger.execute("reset");
                 for l in outs { self.push_log(l); }
                 self.running = false;
+            }
+            KeyCode::Char('R') => {
+                self.show_ref = !self.show_ref;
+                if !self.show_ref && self.focus == Focus::Ref {
+                    self.cycle_focus();
+                }
             }
             KeyCode::Char('D') => self.show_dis = !self.show_dis,
             KeyCode::Tab => self.cycle_focus(),
@@ -565,6 +585,7 @@ impl App {
                 Focus::State => { self.state_cursor_row = 0; self.state_cursor_col = 0; }
                 Focus::Dis => self.dis_scroll = 0,
                 Focus::Log => self.log_scroll = self.log.len().saturating_sub(1),
+                Focus::Ref => self.ref_page = 0,
             },
             KeyCode::Char('G') => match self.focus {
                 Focus::Tape(i) => {
@@ -574,6 +595,7 @@ impl App {
                 Focus::State => { self.state_cursor_row = 10; self.state_cursor_col = 9; }
                 Focus::Dis => self.dis_scroll = 100,
                 Focus::Log => self.log_scroll = 0,
+                Focus::Ref => self.ref_page = REF_PAGE_COUNT - 1,
             },
             KeyCode::Enter => {
                 match self.focus {
@@ -996,6 +1018,17 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     let main_area = vchunks[0];
     let status_area = vchunks[1];
 
+    // Split horizontally when ref panel is visible
+    let (left_area, ref_area_opt) = if app.show_ref {
+        let hchunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(40), Constraint::Length(72)])
+            .split(main_area);
+        (hchunks[0], Some(hchunks[1]))
+    } else {
+        (main_area, None)
+    };
+
     let visible = app.visible_tapes();
     let show_tapes = !visible.is_empty();
     let show_mid = app.show_state || app.show_dis;
@@ -1011,6 +1044,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     if show_log   { row_log  = Some(v_constraints.len()); v_constraints.push(Constraint::Min(3)); }
 
     if v_constraints.is_empty() {
+        if let Some(ra) = ref_area_opt { render_ref_panel(f, app, ra); }
         render_status(f, app, status_area);
         return;
     }
@@ -1020,7 +1054,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints(v_constraints)
-        .split(main_area);
+        .split(left_area);
 
     // Tape row
     if let Some(ri) = row_tape {
@@ -1056,6 +1090,9 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
 
     // Log
     if let Some(ri) = row_log { render_log(f, app, rows[ri]); }
+
+    // Ref panel (right column)
+    if let Some(ra) = ref_area_opt { render_ref_panel(f, app, ra); }
 
     render_status(f, app, status_area);
 
@@ -1469,11 +1506,11 @@ fn render_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
     } else if app.cli_mode {
         (format!("(witch) {}_", app.cli_buf), Style::default().fg(Color::Yellow))
     } else if app.running {
-        (" [Space]halt  [n]step  [b]bp  [D]dis  [Tab]focus  [R]reset  [q]quit  RUNNING".into(),
+        (" [Space]halt  [n]step  [b]bp  [D]dis  [Tab]focus  [r]reset  [R]ref  [q]quit  RUNNING".into(),
          Style::default().fg(Color::Green))
     } else {
         let halted_marker = if app.debugger.machine.halted { " [HALTED]" } else { "" };
-        (format!(" [Space]run  [n]step  [b]bp  [D]dis  [S]state  [O]output  [1-7]tape  [`]cli  [q]quit{}", halted_marker),
+        (format!(" [Space]run  [n]step  [b]bp  [D]dis  [S]state  [O]output  [R]ref  [1-7]tape  [`]cli  [q]quit{}", halted_marker),
          Style::default().fg(Color::DarkGray))
     };
     f.render_widget(Paragraph::new(text).style(style), area);
@@ -1490,7 +1527,7 @@ fn render_help_popup(f: &mut ratatui::Frame, area: Rect) {
         ("Execution", ""),
         ("Space",            "run / pause"),
         ("n",                "step one order"),
-        ("R",                "reset (rewind tape 1, seek block 1)"),
+        ("r",                "reset (rewind tape 1, seek block 1)"),
         ("b",                "toggle breakpoint at cursor"),
         ("Ctrl+C",           "stop running"),
         ("", ""),
@@ -1509,6 +1546,7 @@ fn render_help_popup(f: &mut ratatui::Frame, area: Rect) {
         ("S",                "show/hide state pane"),
         ("D",                "show/hide disassembly pane"),
         ("O",                "show/hide output pane"),
+        ("R",                "show/hide reference panel (j/k to page)"),
         ("", ""),
         ("Other", ""),
         ("`",                "open CLI command prompt"),
@@ -1516,7 +1554,7 @@ fn render_help_popup(f: &mut ratatui::Frame, area: Rect) {
         ("?",                "close this help"),
     ];
 
-    let content_w = 62u16;
+    let content_w = 64u16;
     let content_h = lines.len() as u16 + 2;
     let popup_w = content_w.min(area.width.saturating_sub(4));
     let popup_h = content_h.min(area.height.saturating_sub(2));
@@ -1588,6 +1626,234 @@ fn render_edit_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
         ))),
     ];
     f.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+// ── Reference panel ───────────────────────────────────────────────────────────
+
+const REF_PAGE_COUNT: usize = 6;
+
+fn ref_page_lines(page: usize) -> Vec<Line<'static>> {
+    // h = section header, r = table row (key | value), t = plain text, b = blank
+    macro_rules! h { ($s:expr) => { Line::from(Span::styled($s, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))) }; }
+    macro_rules! r { ($k:expr, $v:expr) => { Line::from(vec![
+        Span::styled(format!("  {:18}", $k), Style::default().fg(Color::Cyan)),
+        Span::raw($v),
+    ]) }; }
+    macro_rules! t { ($s:expr) => { Line::from(Span::styled(format!("  {}", $s), Style::default().fg(Color::Gray))) }; }
+    macro_rules! b { () => { Line::from("") }; }
+
+    match page {
+        0 => vec![
+            h!("Arithmetic  (ops 1–7)"),
+            b!(),
+            r!("1 ss rr", "Add, hold       dest += src"),
+            r!("2 ss rr", "Add, clear      dest += src; src = 0"),
+            r!("3 ss rr", "Subtract, hold  dest -= src"),
+            r!("4 ss rr", "Sub, clear      dest -= src; src = 0"),
+            r!("5 ss rr", "Multiply        acc += src×dest; dest = 0"),
+            r!("6 ss rr", "Divide          dest = acc/src; acc = rem"),
+            r!("7 ss rr", "Modulus, hold   dest += |src|"),
+            b!(),
+            h!("Arithmetic Constraints"),
+            b!(),
+            t!("Ops 2/4 need shift==2 (default); not on exc. pairs"),
+            b!(),
+            t!("Ops 5/6: src and dest must NOT be in 00–09"),
+            b!(),
+            t!("|result| ≥ 10 → alarm stop"),
+            b!(),
+            t!("Neg multiplier can transiently overflow even if"),
+            t!("  final product fits — machine alarm may fire"),
+            b!(),
+            t!("Divide: oversized quotient runs long (no cap)"),
+            t!("Exact divide: +dividend off by -1 in last digit"),
+            b!(),
+            h!("Shift (08n00) — applies to next 1/3/7 only"),
+            b!(),
+            r!("A  ×10", "B  ×1  C  ×10⁻¹  D  ×10⁻²"),
+            r!("E  ×10⁻³", "F  ×10⁻⁴  G  ×10⁻⁵  H  ×10⁻⁶"),
+            r!("J  ×10⁻⁷", "(shift letter in digit 3 of 08n00)"),
+            t!("A drops leading digit. C–J drop trailing digits"),
+            t!("  (into acc extra low digits, not lost)"),
+            t!("shift not consumed by I/O, mul, or div orders"),
+        ],
+        1 => vec![
+            h!("Control  (ops 00x)"),
+            b!(),
+            r!("00000", "No-op — ignored"),
+            r!("00100", "Finish — if held: continue; else lamp+alarm"),
+            r!("00200", "Signal — if held: continue; else lamp+alarm"),
+            b!(),
+            h!("Sign Test"),
+            b!(),
+            r!("011 dd", "flag = (dd is positive)"),
+            r!("012 dd", "flag = (dd is negative)"),
+            b!(),
+            h!("Transfer Control"),
+            b!(),
+            r!("021 rr", "Jump to rr (reader or store location)"),
+            r!("022 rr", "Cond jump — flag unset→STOP, true→jump,"),
+            t!("            false→next order"),
+            b!(),
+            h!("Search"),
+            b!(),
+            r!("03 b rr", "Search tape rr for block b"),
+            r!("05 b rr", "Cond search — flag true→search, else next"),
+            t!("b not on tape → hangs. Alarm if no separator"),
+            t!("  in ~30s, or separator persists >30s"),
+            b!(),
+            h!("Output Control"),
+            b!(),
+            r!("07 n", "Set output layout (see p.4)"),
+            r!("08 n 00", "Set shift factor (see p.1)"),
+        ],
+        2 => vec![
+            h!("Order Format"),
+            b!(),
+            t!("Assrr  — A=opcode, ss=source, rr=dest"),
+            t!("Control orders start with 0 (5 digits)"),
+            t!("All values sign-magnitude, 8 decimal digits"),
+            t!("+0 and -0 are distinct"),
+            b!(),
+            h!("Arithmetic Registers"),
+            b!(),
+            r!("10–19", "group 1  (decade 1)"),
+            r!("20–29", "group 2  (decade 2)"),
+            r!("30–39", "group 3  (decade 3)"),
+            r!("...     90–99", "groups 4–9"),
+            r!("09", "accumulator (whole, ±16 digits)"),
+            r!("08", "acc low-7 digits (×10⁻⁸ as dest)"),
+            b!(),
+            h!("Same-Group Rule"),
+            b!(),
+            t!("ss and rr must have different first digit"),
+            t!("(different decade / group)"),
+            t!("Exceptions for 00–09 addresses — see p.5"),
+        ],
+        3 => vec![
+            h!("Output Layout  (07n)"),
+            b!(),
+            r!("0", "Feed 5 blank rows"),
+            r!("1", "Punch, 8 digits"),
+            r!("2", "Punch, 5 digits + *"),
+            r!("3", "Print, 8 digits, 5 cols, first/mid position"),
+            r!("4", "Print, 8 digits, line end"),
+            r!("5", "Print, 8 digits, line end + blank line"),
+            r!("6", "Print, 6 digits, 6 cols, first/mid"),
+            r!("7", "Print, 6 digits, 5 cols, first/mid"),
+            r!("8", "Print, 6 digits, line end"),
+            r!("9", "Print, 6 digits, line end + blank line"),
+            b!(),
+            t!("layout must be set before any output order"),
+            t!("first/mid: item goes in next column slot;"),
+            t!("  line-end layouts flush the line buffer"),
+            b!(),
+            h!("Output Destinations"),
+            b!(),
+            r!("01", "Printer (write-only; set layout first)"),
+            r!("02", "Perforator / punch"),
+            r!("03", "Printer (second output channel)"),
+            r!("04", "Perforator (second punch)"),
+            b!(),
+            h!("Input Sources (as ss)"),
+            b!(),
+            r!("01–07", "Reader tapes 1–7 (advance tape pos)"),
+        ],
+        4 => vec![
+            h!("Special Addresses  00–09"),
+            b!(),
+            h!("As source (ss)"),
+            b!(),
+            r!("00", "Round-off: random 0 or 1, sign auto-matched"),
+            r!("", "  (7th decimal digit position by default)"),
+            r!("01–07", "Reader tapes 1–7 (read next value)"),
+            r!("08", "Acc low 7 digits + acc sign  (×10⁸ true val)"),
+            r!("09", "Whole accumulator  (±16 digits)"),
+            b!(),
+            h!("As destination (rr)"),
+            b!(),
+            r!("00", "Drain (discard written value)"),
+            r!("01", "Printer  (layout required)"),
+            r!("02", "Perforator"),
+            r!("03", "Printer  (layout required)"),
+            r!("04", "Perforator"),
+            r!("05–07", "Spare (no effect)"),
+            r!("08", "Acc low 7 digits, scaled ×10⁻⁸ (8th dropped)"),
+            r!("09", "Whole accumulator"),
+            b!(),
+            h!("00–09 Exception Pairs  (no op 2/4)"),
+            b!(),
+            t!("00→09  01-07→00  01-07→09  08→00"),
+            t!("08→01-04  09→00  09→01-04"),
+            t!("08 is only path to acc's lowest 7 digits"),
+            t!("  (beats any shift; max ×10⁻⁷ not enough)"),
+        ],
+        5 => vec![
+            h!("Tape & Block Structure"),
+            b!(),
+            t!("Tape: sequence of blocks separated by markers"),
+            t!("Block: header 'b' (1 digit) then data entries"),
+            t!("Entries: 8-digit sign-magnitude numbers"),
+            t!("Orders: 5-digit codes (Assrr) stored as values"),
+            b!(),
+            h!("Block Search (03brr)"),
+            b!(),
+            t!("b = block number (1 digit)"),
+            t!("rr = tape address (01–07, or store location)"),
+            t!("Machine scans tape forward for block marker b"),
+            t!("If EOF reached: wraps from start of tape"),
+            t!("Block 0 is a convention for 'header' / init"),
+            b!(),
+            h!("Startup / Reset"),
+            b!(),
+            t!("On reset: search tape 1 for block 1 (03101)"),
+            t!("Then position IP there (02101)"),
+            t!("This mirrors hard-wired startup sequence"),
+            b!(),
+            h!("Accumulator Detail"),
+            b!(),
+            t!("acc: signed 16-digit register"),
+            t!("mul (op 5): acc += src×dest; dest zeroed"),
+            t!("div (op 6): dest = acc/src; acc = remainder"),
+            t!("  — requires acc ≠ +0 before divide"),
+            t!("  — dest must be 0 before divide"),
+            t!("08 as src: gives low 7 of acc, scaled ×10⁸"),
+            t!("08 as dst: writes low 7 of acc, scale ×10⁻⁸"),
+        ],
+        _ => vec![Line::from("")],
+    }
+}
+
+fn render_ref_panel(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let focused = app.focus == Focus::Ref;
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let page = app.ref_page.min(REF_PAGE_COUNT - 1);
+    let title = format!(" Reference  {}/{} ", page + 1, REF_PAGE_COUNT);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(border_style);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines = ref_page_lines(page);
+    let nav = Line::from(Span::styled(
+        "  j/k ↑/↓ = prev/next page",
+        Style::default().fg(Color::DarkGray),
+    ));
+    let mut all = lines;
+    // pad so nav hint sits at bottom if room
+    let inner_h = inner.height as usize;
+    while all.len() + 1 < inner_h {
+        all.push(Line::from(""));
+    }
+    all.push(nav);
+
+    f.render_widget(Paragraph::new(Text::from(all)), inner);
 }
 
 // ── Terminal setup/teardown ───────────────────────────────────────────────────
