@@ -341,9 +341,8 @@ impl Debugger {
             let tape_start = start.unwrap_or_else(|| cur_pos.unwrap_or(tape.pos));
             let mut items: Vec<(String, usize, Option<String>)> = Vec::new();
             let mut comment_idx = tape.comments.partition_point(|(before, _)| *before < tape_start);
-            let mut entry_count = 0;
             let mut next_start = tape_start;
-            for (idx, entry) in tape.entries.iter().enumerate().skip(tape_start) {
+            for (entry_count, (idx, entry)) in tape.entries.iter().enumerate().skip(tape_start).enumerate() {
                 if entry_count >= n {
                     break;
                 }
@@ -367,7 +366,6 @@ impl Debugger {
                     base_plain
                 };
                 items.push((base, plain_len, inline));
-                entry_count += 1;
                 next_start = idx + 1;
             }
             (align_inline_comments(items), next_start)

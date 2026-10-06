@@ -182,13 +182,12 @@ impl App {
             // Follow IP in tape view; render centers if off-screen
             if let Some(tape_num) = self.debugger.machine.active_tape_num() {
                 let tape_idx = tape_num - 1;
-                if tape_idx < 7 {
-                    if let Some(tape) = self.debugger.machine.tapes[tape_idx].as_ref() {
+                if tape_idx < 7
+                    && let Some(tape) = self.debugger.machine.tapes[tape_idx].as_ref() {
                         let comment_count = tape.comments.iter().filter(|(b, _)| *b <= pos).count();
                         let block_count = tape.entries[..pos].iter().filter(|e| matches!(e, TapeEntry::Block(_))).count();
                         self.tape_cursor[tape_idx] = (pos - block_count) + comment_count;
                     }
-                }
             }
         }
     }
@@ -211,14 +210,14 @@ impl App {
         let panes = self.focus_panes();
         if panes.is_empty() { return; }
         let cur = panes.iter().position(|p| p == &self.focus).unwrap_or(0);
-        self.focus = panes[(cur + 1) % panes.len()].clone();
+        self.focus = panes[(cur + 1) % panes.len()];
     }
 
     fn cycle_focus_backward(&mut self) {
         let panes = self.focus_panes();
         if panes.is_empty() { return; }
         let cur = panes.iter().position(|p| p == &self.focus).unwrap_or(0);
-        self.focus = panes[(cur + panes.len() - 1) % panes.len()].clone();
+        self.focus = panes[(cur + panes.len() - 1) % panes.len()];
     }
 
     fn scroll_left(&mut self) {
@@ -405,24 +404,22 @@ impl App {
             Some(i) => i,
             None => return,
         };
-        if let Some(Some(tape)) = self.debugger.machine.tapes.get_mut(tape_idx) {
-            if entry_idx < tape.entries.len() {
+        if let Some(Some(tape)) = self.debugger.machine.tapes.get_mut(tape_idx)
+            && entry_idx < tape.entries.len() {
                 tape.entries.remove(entry_idx);
                 if tape.pos > entry_idx && tape.pos > 0 {
                     tape.pos -= 1;
                 }
                 // sync IP if this tape is active
-                if let IP::Tape { reader, ref mut pos } = self.debugger.machine.ip {
-                    if reader == tape_idx {
+                if let IP::Tape { reader, ref mut pos } = self.debugger.machine.ip
+                    && reader == tape_idx {
                         *pos = self.debugger.machine.tapes[tape_idx]
                             .as_ref().map(|t| t.pos).unwrap_or(0);
                     }
-                }
                 if self.tape_cursor[tape_idx] > 0 {
                     self.tape_cursor[tape_idx] -= 1;
                 }
             }
-        }
     }
 
     fn insert_tape_entry(&mut self, after: bool) {
@@ -487,11 +484,10 @@ impl App {
                 let s = self.edit_buf.trim().to_string();
                 match parse_tape_entry_str(&s) {
                     Ok(entry) => {
-                        if let Some(Some(t)) = self.debugger.machine.tapes.get_mut(tape) {
-                            if idx < t.entries.len() {
+                        if let Some(Some(t)) = self.debugger.machine.tapes.get_mut(tape)
+                            && idx < t.entries.len() {
                                 t.entries[idx] = entry;
                             }
-                        }
                         self.edit = None;
                         self.edit_err = EditError::None;
                     }
@@ -708,9 +704,8 @@ impl App {
                 let path = self.load_prompt_buf.trim().to_string();
                 let target = self.load_prompt.take();
                 self.load_prompt_buf.clear();
-                if !path.is_empty() {
-                    if let Some(t) = target { self.load_path(&path, t); }
-                }
+                if !path.is_empty()
+                    && let Some(t) = target { self.load_path(&path, t); }
             }
             KeyCode::Char(c) => {
                 self.load_compl = None;
@@ -1058,7 +1053,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
 
     // Tape row
     if let Some(ri) = row_tape {
-        let n_cols = visible.len().min(4).max(1);
+        let n_cols = visible.len().clamp(1, 4);
         let tape_constraints: Vec<Constraint> = (0..n_cols)
             .map(|_| Constraint::Ratio(1, n_cols as u32))
             .collect();
@@ -1964,11 +1959,10 @@ fn event_loop(
                 app.step_once();
                 if !app.running || app.debugger.machine.halted { break; }
             }
-            if event::poll(Duration::ZERO)? {
-                if app.handle_event(event::read()?) {
+            if event::poll(Duration::ZERO)?
+                && app.handle_event(event::read()?) {
                     break;
                 }
-            }
         } else {
             if app.handle_event(event::read()?) {
                 break;
@@ -1983,8 +1977,8 @@ fn sync_tape_cursors(app: &mut App) {
     let ip_pos = app.debugger.machine.current_tape_pos();
     if let (Some(tape_num), Some(pos)) = (active_tape, ip_pos) {
         let tape_idx = tape_num - 1;
-        if tape_idx < 7 {
-            if let Some(tape) = app.debugger.machine.tapes[tape_idx].as_ref() {
+        if tape_idx < 7
+            && let Some(tape) = app.debugger.machine.tapes[tape_idx].as_ref() {
                 let comment_count_before = tape.comments.iter()
                     .filter(|(before, _)| *before <= pos)
                     .count();
@@ -1998,6 +1992,5 @@ fn sync_tape_cursors(app: &mut App) {
                     }
                 }
             }
-        }
     }
 }

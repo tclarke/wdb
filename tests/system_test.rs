@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use wdb::machine::{HaltReason, Machine, Output};
-use wdb::tape::parse_tape_content;
+use wdb_witch::machine::{HaltReason, Machine, Output};
+use wdb_witch::tape::parse_tape_content;
 
 const MAX_STEPS: usize = 100_000;
 
@@ -114,7 +114,7 @@ fn run_tape_test(path: &Path) -> Result<(), String> {
         let actual: Vec<String> = outputs
             .iter()
             .filter_map(|o| match o {
-                Output::Print(s) => Some(s.trim().to_string()),
+                Output::Print(_, s) => Some(s.trim().to_string()),
                 _ => None,
             })
             .filter(|s| !s.is_empty())

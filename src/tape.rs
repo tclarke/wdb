@@ -253,9 +253,9 @@ pub fn parse_tape_content(content: &str) -> Result<Vec<(usize, Tape)>, String> {
         let trimmed = raw_line.trim();
 
         // standalone comment line
-        if trimmed.starts_with(';') {
+        if let Some(stripped) = trimmed.strip_prefix(';') {
             if current_tape_num.is_some() {
-                let text = trimmed[1..].trim().to_string();
+                let text = stripped.trim().to_string();
                 current_comments.push((current_entries.len(), text));
             }
             continue;

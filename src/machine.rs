@@ -615,7 +615,7 @@ impl Machine {
     fn write_addr(&mut self, addr: u8, val: WitchNum) -> Result<Vec<Output>, HaltReason> {
         match addr {
             0 => Ok(Vec::new()),
-            1 | 3 | 2 | 4 => self.write_output(addr, val),
+            1..=4 => self.write_output(addr, val),
             5..=7 => Ok(Vec::new()),
             8 => {
                 let low7 = val.magnitude % 10_000_000;
@@ -710,7 +710,7 @@ impl Machine {
             return vec![];
         }
         let dst = self.line_buf_dst;
-        let s = self.line_buf.drain(..).collect::<Vec<_>>().join("\t") + " [incomplete]\n";
+        let s = std::mem::take(&mut self.line_buf).join("\t") + " [incomplete]\n";
         self.line_buf_dst = 0;
         self.col = 0;
         vec![Self::make_output(dst, s)]
