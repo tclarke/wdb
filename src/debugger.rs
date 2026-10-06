@@ -1,6 +1,6 @@
 use crate::disasm::disassemble;
 use crate::machine::{Machine, Output, IP};
-use crate::tape::{parse_tape_file, TapeEntry, WitchAcc, WitchNum};
+use crate::tape::{order_entry_idx, order_line_num, parse_tape_file, TapeEntry, WitchAcc, WitchNum};
 use colored::Colorize;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -356,11 +356,13 @@ impl Debugger {
                     .find(|(i, _)| *i == idx)
                     .map(|(_, c)| c.clone());
                 let at_cur = cur_pos == Some(idx);
-                let base_plain = format!("{} {:4}: {}", if at_cur { ">" } else { " " }, idx + 1, entry);
+                let lnum = if matches!(entry, TapeEntry::Block(_)) { 0 } else { order_line_num(&tape.entries, idx) };
+                let lnum_str = if lnum == 0 { "    ".to_string() } else { format!("{:4}", lnum) };
+                let base_plain = format!("{} {}: {}", if at_cur { ">" } else { " " }, lnum_str, entry);
                 let plain_len = base_plain.len();
                 let base = if use_color() {
                     let marker = if at_cur { "▶".bright_cyan().bold().to_string() } else { " ".to_string() };
-                    format!("{} {}: {}", marker, format!("{:4}", idx + 1).dimmed(), entry)
+                    format!("{} {}: {}", marker, lnum_str.dimmed(), entry)
                 } else {
                     base_plain
                 };
@@ -421,17 +423,18 @@ impl Debugger {
                 break;
             }
             if let TapeEntry::Order(o) = entry {
-                let bp = self.bp_marker(tape_num, idx + 1);
+                let lnum = order_line_num(&tape.entries, idx);
+                let bp = self.bp_marker(tape_num, idx);
                 let inline = inline_comments.iter()
                     .find(|(i, _)| *i == idx)
                     .map(|(_, c)| c.clone());
                 let at_cur = cur_pos == Some(idx);
                 let cur_marker = if at_cur { ">" } else { " " };
-                let base_plain = format!("{}{} {:4}: {:05}  {}", bp.plain, cur_marker, idx + 1, o, disassemble(*o));
+                let base_plain = format!("{}{} {:4}: {:05}  {}", bp.plain, cur_marker, lnum, o, disassemble(*o));
                 let plain_len = base_plain.len();
                 let base = if use_color() {
                     let cur_col = if at_cur { "▶".bright_cyan().bold().to_string() } else { " ".to_string() };
-                    format!("{}{} {}: {:05}  {}", bp.colored, cur_col, format!("{:4}", idx + 1).dimmed(), o, disassemble(*o))
+                    format!("{}{} {}: {:05}  {}", bp.colored, cur_col, format!("{:4}", lnum).dimmed(), o, disassemble(*o))
                 } else {
                     base_plain
                 };
@@ -564,9 +567,15 @@ impl Debugger {
                 };
                 let tape = args.get(2).and_then(|s| s.parse().ok())
                     .unwrap_or_else(|| self.machine.active_tape_num().unwrap_or(1));
+                let entry_idx = match self.machine.tapes.get(tape - 1).and_then(|t| t.as_ref())
+                    .and_then(|t| order_entry_idx(&t.entries, lineno))
+                {
+                    Some(i) => i,
+                    None => return vec![format!("line {} not found on tape {}", lineno, tape)],
+                };
                 let id = self.next_bp_id;
                 self.next_bp_id += 1;
-                self.breakpoints.push(Breakpoint { id, kind: BpKind::Line(lineno), tape, enabled: true, conditions: Vec::new() });
+                self.breakpoints.push(Breakpoint { id, kind: BpKind::Line(entry_idx), tape, enabled: true, conditions: Vec::new() });
                 vec![format!("breakpoint {} set: line {} on tape {}", id, lineno, tape)]
             }
             "dis" => {
@@ -670,7 +679,11 @@ impl Debugger {
             let status = if bp.enabled { "enabled" } else { "disabled" };
             let kind = match bp.kind {
                 BpKind::Block(b) => format!("block {} tape {}", b, bp.tape),
-                BpKind::Line(n) => format!("line {} tape {}", n, bp.tape),
+                BpKind::Line(entry_idx) => {
+                    let lnum = self.machine.tapes.get(bp.tape - 1).and_then(|t| t.as_ref())
+                        .map(|t| order_line_num(&t.entries, entry_idx)).unwrap_or(entry_idx + 1);
+                    format!("line {} tape {}", lnum, bp.tape)
+                }
             };
             let conds = if bp.conditions.is_empty() {
                 String::new()
@@ -750,17 +763,19 @@ impl Debugger {
                     .find(|(i, _)| *i == idx)
                     .map(|(_, c)| c.clone());
                 let at_cur = cur_pos == Some(idx);
-                let base_plain = format!("{} {:4}: {}", if at_cur { ">" } else { " " }, idx + 1, entry);
+                let lnum = if matches!(entry, TapeEntry::Block(_)) { 0 } else { order_line_num(&tape.entries, idx) };
+                let lnum_str = if lnum == 0 { "    ".to_string() } else { format!("{:4}", lnum) };
+                let base_plain = format!("{} {}: {}", if at_cur { ">" } else { " " }, lnum_str, entry);
                 let plain_len = base_plain.len();
                 let base = if use_color() {
                     let marker = if at_cur { "▶".bright_cyan().bold().to_string() } else { " ".to_string() };
-                    format!("{} {}: {}", marker, format!("{:4}", idx + 1).dimmed(), entry)
+                    format!("{} {}: {}", marker, lnum_str.dimmed(), entry)
                 } else {
                     base_plain
                 };
                 if show_dis {
                     if let TapeEntry::Order(o) = entry {
-                        let with_dis_plain = format!("{}  {}", if at_cur { format!("> {:4}: {}", idx + 1, entry) } else { format!("  {:4}: {}", idx + 1, entry) }, disassemble(*o));
+                        let with_dis_plain = format!("{}  {}", if at_cur { format!("> {}: {}", lnum_str, entry) } else { format!("  {}: {}", lnum_str, entry) }, disassemble(*o));
                         let plain_len_dis = with_dis_plain.len();
                         let base_dis = format!("{}  {}", base, disassemble(*o));
                         items.push((base_dis, plain_len_dis, inline));
@@ -848,8 +863,8 @@ impl Debugger {
         }
     }
 
-    fn bp_marker(&self, tape_num: usize, line_1indexed: usize) -> BpMarker {
-        let bp = self.breakpoints.iter().find(|b| b.tape == tape_num && matches!(b.kind, BpKind::Line(n) if n == line_1indexed));
+    fn bp_marker(&self, tape_num: usize, entry_idx: usize) -> BpMarker {
+        let bp = self.breakpoints.iter().find(|b| b.tape == tape_num && matches!(b.kind, BpKind::Line(n) if n == entry_idx));
         match bp {
             None => BpMarker { plain: " ", colored: " ".to_string() },
             Some(b) if !b.enabled => BpMarker { plain: "-", colored: "○".dimmed().to_string() },
@@ -860,7 +875,11 @@ impl Debugger {
 
     fn show_position(&self) -> Vec<String> {
         match self.machine.ip {
-            IP::Tape { reader, pos } => vec![format!("tape {} line {}", reader + 1, pos + 1)],
+            IP::Tape { reader, pos } => {
+                let lnum = self.machine.tapes.get(reader).and_then(|t| t.as_ref())
+                    .map(|t| order_line_num(&t.entries, pos)).unwrap_or(pos + 1);
+                vec![format!("tape {} line {}", reader + 1, lnum)]
+            }
             IP::Store(addr) => vec![format!("store {}", addr)],
         }
     }
@@ -890,14 +909,15 @@ impl Debugger {
                     // check if the entry just before current pos is this block marker
                     pos > 0 && matches!(tape.entries.get(pos - 1), Some(TapeEntry::Block(blk)) if *blk == b)
                 }
-                BpKind::Line(line) => pos + 1 == line,
+                BpKind::Line(entry_idx) => pos == entry_idx,
             };
 
             if hit {
                 let cond_met = bp.conditions.is_empty()
                     || bp.conditions.iter().all(|c| eval_condition(c, &self.machine));
                 if cond_met {
-                    return Some(format!("breakpoint {} hit at tape {} line {}", bp.id, tape_num, pos + 1).bold().yellow().to_string());
+                    let lnum = order_line_num(&tape.entries, pos);
+                    return Some(format!("breakpoint {} hit at tape {} line {}", bp.id, tape_num, lnum).bold().yellow().to_string());
                 }
             }
         }

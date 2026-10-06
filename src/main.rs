@@ -67,20 +67,26 @@ fn main() {
         std::process::exit(code);
     }
 
+    let mut startup_msgs: Vec<String> = Vec::new();
+
     if let Some(path) = tape_arg {
         let out = dbg.execute(&format!("load {}", path));
-        for line in &out {
-            println!("{}", line);
+        if tui_mode {
+            startup_msgs.extend(out);
+        } else {
+            for line in &out { println!("{}", line); }
         }
         // Auto-reset to run startup sequence
         let out = dbg.execute("reset");
-        for line in &out {
-            println!("{}", line);
+        if tui_mode {
+            startup_msgs.extend(out);
+        } else {
+            for line in &out { println!("{}", line); }
         }
     }
 
     if tui_mode {
-        if let Err(e) = tui::run_tui(dbg) {
+        if let Err(e) = tui::run_tui(dbg, startup_msgs) {
             eprintln!("tui error: {}", e);
             std::process::exit(1);
         }

@@ -17,7 +17,7 @@ use ratatui::Terminal;
 
 use crate::debugger::{BpKind, Breakpoint, Debugger};
 use crate::machine::{Machine, Output, IP};
-use crate::tape::{TapeEntry, WitchAcc, WitchNum};
+use crate::tape::{order_line_num, TapeEntry, WitchAcc, WitchNum};
 use crate::disasm::disassemble;
 
 const LOG_CAP: usize = 1000;
@@ -167,11 +167,21 @@ impl App {
                 self.push_log(l);
             }
         }
-        // sync dis_cursor to new IP if dis pane is not being manually navigated
         if let Some(pos) = self.debugger.machine.current_tape_pos() {
             self.dis_cursor = pos;
             if pos < self.dis_scroll {
                 self.dis_scroll = pos;
+            }
+            // Follow IP in tape view; render centers if off-screen
+            if let Some(tape_num) = self.debugger.machine.active_tape_num() {
+                let tape_idx = tape_num - 1;
+                if tape_idx < 7 {
+                    if let Some(tape) = self.debugger.machine.tapes[tape_idx].as_ref() {
+                        let comment_count = tape.comments.iter().filter(|(b, _)| *b <= pos).count();
+                        let block_count = tape.entries[..pos].iter().filter(|e| matches!(e, TapeEntry::Block(_))).count();
+                        self.tape_cursor[tape_idx] = (pos - block_count) + comment_count;
+                    }
+                }
             }
         }
     }
@@ -306,40 +316,65 @@ impl App {
         let tape_num = tape_idx + 1;
         // cursor is over display rows; find entry index at cursor
         let entry_idx = display_row_to_entry(&self.debugger.machine, tape_idx, cursor)?;
-        let line_1indexed = entry_idx + 1;
         self.debugger.breakpoints().iter().find(|b| {
-            b.tape == tape_num && matches!(b.kind, BpKind::Line(n) if n == line_1indexed)
+            b.tape == tape_num && matches!(b.kind, BpKind::Line(n) if n == entry_idx)
         })
     }
 
     fn toggle_bp(&mut self) {
-        let (tape_num, line_1indexed) = match self.focus {
+        // Block marker: set BpKind::Block breakpoint (fires at first order after the marker)
+        if let Focus::Tape(i) = self.focus {
+            let cursor = self.tape_cursor[i];
+            if let Some(entry_idx) = display_row_to_entry(&self.debugger.machine, i, cursor) {
+                let tape_num = i + 1;
+                let block_num = self.debugger.machine.tapes[i].as_ref()
+                    .and_then(|t| t.entries.get(entry_idx))
+                    .and_then(|e| if let TapeEntry::Block(b) = e { Some(*b) } else { None });
+                if let Some(b_val) = block_num {
+                    let existing = self.debugger.breakpoints().iter()
+                        .find(|bp| bp.tape == tape_num && matches!(bp.kind, BpKind::Block(blk) if blk == b_val))
+                        .map(|bp| bp.id);
+                    if let Some(id) = existing {
+                        let outs = self.debugger.execute(&format!("break rm {}", id));
+                        for l in outs { self.push_log(l); }
+                    } else {
+                        let outs = self.debugger.execute(&format!("break block {} {}", b_val, tape_num));
+                        for l in outs { self.push_log(l); }
+                    }
+                    return;
+                }
+            }
+        }
+        let (tape_num, entry_idx) = match self.focus {
             Focus::Tape(i) => {
                 let cursor = self.tape_cursor[i];
                 let entry_idx = match display_row_to_entry(&self.debugger.machine, i, cursor) {
                     Some(idx) => idx,
                     None => return,
                 };
-                (i + 1, entry_idx + 1)
+                (i + 1, entry_idx)
             }
             Focus::Dis => {
                 let tape_num = match self.debugger.machine.active_tape_num() {
                     Some(n) => n,
                     None => return,
                 };
-                (tape_num, self.dis_cursor + 1)
+                (tape_num, self.dis_cursor)
             }
             _ => return,
         };
-        // check if bp already exists
+        // check if bp already exists (BpKind::Line stores raw entry_idx)
         let existing = self.debugger.breakpoints().iter().find(|b| {
-            b.tape == tape_num && matches!(b.kind, BpKind::Line(n) if n == line_1indexed)
+            b.tape == tape_num && matches!(b.kind, BpKind::Line(n) if n == entry_idx)
         }).map(|b| b.id);
         if let Some(id) = existing {
             let outs = self.debugger.execute(&format!("break rm {}", id));
             for l in outs { self.push_log(l); }
         } else {
-            let outs = self.debugger.execute(&format!("break line {} {}", line_1indexed, tape_num));
+            // break line command takes order line num (skipping blocks)
+            let lnum = self.debugger.machine.tapes.get(tape_num - 1).and_then(|t| t.as_ref())
+                .map(|t| order_line_num(&t.entries, entry_idx)).unwrap_or(entry_idx + 1);
+            let outs = self.debugger.execute(&format!("break line {} {}", lnum, tape_num));
             for l in outs { self.push_log(l); }
         }
     }
@@ -593,14 +628,14 @@ impl App {
                 }
             }
             // load tape(s)
-            KeyCode::Char('l') => {
+            KeyCode::Char('f') => {
                 let tape_idx = match self.focus {
                     Focus::Tape(i) => i,
                     _ => self.visible_tapes().first().copied().unwrap_or(0),
                 };
                 self.fzf_request = Some(Some(tape_idx));
             }
-            KeyCode::Char('L') => {
+            KeyCode::Char('F') => {
                 self.fzf_request = Some(None);
             }
             // unload tape(s)
@@ -766,7 +801,8 @@ impl App {
 /// Total number of display rows for a tape (entries + standalone comments).
 fn tape_display_len(machine: &Machine, tape_idx: usize) -> usize {
     machine.tapes[tape_idx].as_ref().map(|t| {
-        t.entries.len() + t.comments.len()
+        let non_block = t.entries.iter().filter(|e| !matches!(e, TapeEntry::Block(_))).count();
+        non_block + t.comments.len()
     }).unwrap_or(0)
 }
 
@@ -775,13 +811,17 @@ fn display_row_to_entry(machine: &Machine, tape_idx: usize, display_row: usize) 
     let tape = machine.tapes[tape_idx].as_ref()?;
     let mut row = 0usize;
     let mut comment_idx = 0usize;
-    for (entry_idx, _) in tape.entries.iter().enumerate() {
+    for (entry_idx, entry) in tape.entries.iter().enumerate() {
         while comment_idx < tape.comments.len() && tape.comments[comment_idx].0 == entry_idx {
             if row == display_row {
                 return None; // cursor is on a comment row
             }
             row += 1;
             comment_idx += 1;
+        }
+        // Block entries are folded into the next entry's gutter, not a separate display row
+        if matches!(entry, TapeEntry::Block(_)) {
+            continue;
         }
         if row == display_row {
             return Some(entry_idx);
@@ -805,19 +845,32 @@ fn build_tape_rows(
     };
     let mut rows = Vec::new();
     let mut comment_idx = 0usize;
+    let mut pending_block: Option<(u8, Option<usize>, Option<bool>)> = None;
     for (entry_idx, entry) in tape.entries.iter().enumerate() {
         while comment_idx < tape.comments.len() && tape.comments[comment_idx].0 == entry_idx {
             rows.push(TapeRow::Comment(tape.comments[comment_idx].1.clone()));
             comment_idx += 1;
         }
+        if let TapeEntry::Block(b_val) = entry {
+            let bp = bps.iter().find(|bp| {
+                bp.tape == tape_num && matches!(bp.kind, BpKind::Block(blk) if blk == *b_val)
+            });
+            pending_block = Some((*b_val, bp.map(|b| b.id), bp.map(|b| b.enabled)));
+            continue;
+        }
         let at_cur = ip_pos == Some(entry_idx);
         let bp = bps.iter().find(|b| {
-            b.tape == tape_num && matches!(b.kind, BpKind::Line(n) if n == entry_idx + 1)
+            b.tape == tape_num && matches!(b.kind, BpKind::Line(n) if n == entry_idx)
         });
         let inline = tape.inline_comments.iter()
             .find(|(i, _)| *i == entry_idx)
             .map(|(_, c)| c.clone());
-        rows.push(TapeRow::Entry { entry_idx, entry: entry.clone(), at_cur, bp_id: bp.map(|b| b.id), bp_enabled: bp.map(|b| b.enabled), inline });
+        let (block_num, block_bp_id, block_bp_enabled) = match pending_block.take() {
+            Some((n, id, en)) => (Some(n), id, en),
+            None => (None, None, None),
+        };
+        let line_num = order_line_num(&tape.entries, entry_idx);
+        rows.push(TapeRow::Entry { line_num, entry: entry.clone(), at_cur, bp_id: bp.map(|b| b.id), bp_enabled: bp.map(|b| b.enabled), inline, block_num, block_bp_id, block_bp_enabled });
     }
     rows
 }
@@ -825,12 +878,15 @@ fn build_tape_rows(
 enum TapeRow {
     Comment(String),
     Entry {
-        entry_idx: usize,
+        line_num: usize,
         entry: TapeEntry,
         at_cur: bool,
         bp_id: Option<usize>,
         bp_enabled: Option<bool>,
         inline: Option<String>,
+        block_num: Option<u8>,
+        block_bp_id: Option<usize>,
+        block_bp_enabled: Option<bool>,
     },
 }
 
@@ -1038,11 +1094,12 @@ fn render_tape_panel(f: &mut ratatui::Frame, app: &App, area: Rect, tape_idx: us
     let scroll = app.tape_scroll[tape_idx];
     let cursor = app.tape_cursor[tape_idx];
 
-    // Auto-scroll to keep cursor visible
+    // Auto-scroll: center on cursor if it goes off-screen
     let scroll = {
         let mut s = scroll;
-        if cursor < s { s = cursor; }
-        if cursor >= s + visible_height { s = cursor + 1 - visible_height; }
+        if cursor < s || cursor >= s + visible_height {
+            s = cursor.saturating_sub(visible_height / 2);
+        }
         s
     };
 
@@ -1059,7 +1116,7 @@ fn render_tape_panel(f: &mut ratatui::Frame, app: &App, area: Rect, tape_idx: us
                     let line = Line::from(Span::styled(s, Style::default().fg(Color::DarkGray)));
                     if selected { line.style(Style::default().add_modifier(Modifier::REVERSED)) } else { line }
                 }
-                TapeRow::Entry { entry_idx, entry, at_cur, bp_id, bp_enabled, inline } => {
+                TapeRow::Entry { line_num, entry, at_cur, bp_id, bp_enabled, inline, block_num, block_bp_id, block_bp_enabled } => {
                     let (bp_char, bp_style) = bp_marker_char(*bp_id, *bp_enabled);
                     let cur_char = if *at_cur { "▶" } else { " " };
                     let cur_style = if *at_cur {
@@ -1069,14 +1126,23 @@ fn render_tape_panel(f: &mut ratatui::Frame, app: &App, area: Rect, tape_idx: us
                     };
                     let num_style = Style::default().fg(Color::DarkGray);
                     let entry_text = entry.to_string();
-                    let num_str = format!("{:4}: ", entry_idx + 1);
-                    let mut width = 1 + 1 + num_str.chars().count() + entry_text.chars().count();
-                    let mut spans = vec![
+                    let num_str = format!("{:4}: ", line_num);
+                    // 4-char block gutter + 2-char bp/cur gutter + num_str + text
+                    let mut width = 4 + 1 + 1 + num_str.chars().count() + entry_text.chars().count();
+                    let mut spans: Vec<Span> = Vec::new();
+                    if let Some(blk) = block_num {
+                        let (blk_bp_char, blk_bp_style) = bp_marker_char(*block_bp_id, *block_bp_enabled);
+                        spans.push(Span::styled(blk_bp_char, blk_bp_style));
+                        spans.push(Span::styled(format!("[{}]", blk), Style::default().fg(Color::Magenta)));
+                    } else {
+                        spans.push(Span::raw("    "));
+                    }
+                    spans.extend([
                         Span::styled(bp_char, bp_style),
                         Span::styled(cur_char, cur_style),
                         Span::styled(num_str, num_style),
                         Span::raw(entry_text),
-                    ];
+                    ]);
                     if let Some(comment) = inline {
                         let cs = format!("  ; {}", comment);
                         width += cs.chars().count();
@@ -1260,53 +1326,83 @@ fn render_dis(f: &mut ratatui::Frame, app: &App, area: Rect) {
     // find which order-row index dis_scroll starts at
     let scroll_order_row = order_entries.iter().position(|&i| i >= app.dis_scroll).unwrap_or(0);
 
-    // auto-scroll: if cursor is below viewport bottom, adjust scroll
-    let scroll_order_row = if cursor_order_row >= scroll_order_row + max_lines {
-        cursor_order_row + 1 - max_lines
+    // auto-scroll: center on cursor if it goes off-screen
+    let scroll_order_row = if cursor_order_row < scroll_order_row || cursor_order_row >= scroll_order_row + max_lines {
+        cursor_order_row.saturating_sub(max_lines / 2)
     } else {
         scroll_order_row
     };
     let start_entry = order_entries.get(scroll_order_row).copied().unwrap_or(0);
 
+    // scan backward from start_entry to find a block marker that belongs to the first visible order
+    let mut pre_block: Option<u8> = None;
+    for e in tape.entries[..start_entry].iter().rev() {
+        match e {
+            TapeEntry::Block(b) => { pre_block = Some(*b); break; }
+            TapeEntry::Order(_) => break,
+            _ => {}
+        }
+    }
+
     let mut lines: Vec<Line> = Vec::new();
-    let mut count = 0;
+    let mut pending_block: Option<(u8, Option<usize>, Option<bool>)> = if let Some(b) = pre_block {
+        let bp = bps.iter().find(|bp| bp.tape == tape_num && matches!(bp.kind, BpKind::Block(blk) if blk == b));
+        Some((b, bp.map(|b| b.id), bp.map(|b| b.enabled)))
+    } else { None };
     for (idx, entry) in tape.entries.iter().enumerate().skip(start_entry) {
-        if count >= max_lines { break; }
-        let inline = tape.inline_comments.iter()
-            .find(|(i, _)| *i == idx)
-            .map(|(_, c)| c.clone());
-        let at_ip = idx == cur_pos;
-        let at_cursor = focused && idx == app.dis_cursor;
-        if let TapeEntry::Order(o) = entry {
-            let bp = bps.iter().find(|b| {
-                b.tape == tape_num && matches!(b.kind, BpKind::Line(n) if n == idx + 1)
-            });
-            let (bp_char, bp_style) = bp_marker_char(bp.map(|b| b.id), bp.map(|b| b.enabled));
-            let ip_char = if at_ip { "▶" } else { " " };
-            let ip_style = if at_ip {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            let mut spans = vec![
-                Span::styled(bp_char, bp_style),
-                Span::styled(ip_char, ip_style),
-                Span::styled(format!("{:4}: {:05}  ", idx + 1, o), Style::default().fg(Color::DarkGray)),
-                Span::raw(disassemble(*o)),
-            ];
-            if let Some(comment) = inline {
-                spans.push(Span::styled(
-                    format!("  ; {}", comment),
-                    Style::default().fg(Color::DarkGray),
-                ));
+        if lines.len() >= max_lines { break; }
+        match entry {
+            TapeEntry::Block(b) => {
+                let bp = bps.iter().find(|bp| {
+                    bp.tape == tape_num && matches!(bp.kind, BpKind::Block(blk) if blk == *b)
+                });
+                pending_block = Some((*b, bp.map(|b| b.id), bp.map(|b| b.enabled)));
             }
-            let line = Line::from(spans);
-            if at_cursor {
-                lines.push(line.style(Style::default().add_modifier(Modifier::REVERSED)));
-            } else {
-                lines.push(line);
+            TapeEntry::Order(o) => {
+                let inline = tape.inline_comments.iter()
+                    .find(|(i, _)| *i == idx)
+                    .map(|(_, c)| c.clone());
+                let at_ip = idx == cur_pos;
+                let at_cursor = focused && idx == app.dis_cursor;
+                let bp = bps.iter().find(|b| {
+                    b.tape == tape_num && matches!(b.kind, BpKind::Line(n) if n == idx)
+                });
+                let (bp_char, bp_style) = bp_marker_char(bp.map(|b| b.id), bp.map(|b| b.enabled));
+                let ip_char = if at_ip { "▶" } else { " " };
+                let ip_style = if at_ip {
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                let lnum = order_line_num(&tape.entries, idx);
+                let mut spans: Vec<Span> = Vec::new();
+                if let Some((blk, blk_bp_id, blk_bp_enabled)) = pending_block.take() {
+                    let (blk_bp_char, blk_bp_style) = bp_marker_char(blk_bp_id, blk_bp_enabled);
+                    spans.push(Span::styled(blk_bp_char, blk_bp_style));
+                    spans.push(Span::styled(format!("[{}]", blk), Style::default().fg(Color::Magenta)));
+                } else {
+                    spans.push(Span::raw("    "));
+                }
+                spans.extend([
+                    Span::styled(bp_char, bp_style),
+                    Span::styled(ip_char, ip_style),
+                    Span::styled(format!("{:4}: {:05}  ", lnum, o), Style::default().fg(Color::DarkGray)),
+                    Span::raw(disassemble(*o)),
+                ]);
+                if let Some(comment) = inline {
+                    spans.push(Span::styled(
+                        format!("  ; {}", comment),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                let line = Line::from(spans);
+                if at_cursor {
+                    lines.push(line.style(Style::default().add_modifier(Modifier::REVERSED)));
+                } else {
+                    lines.push(line);
+                }
             }
-            count += 1;
+            _ => {}
         }
     }
 
@@ -1438,12 +1534,17 @@ fn restore_terminal(mut terminal: Terminal<CrosstermBackend<Stdout>>) -> Result<
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-pub fn run_tui(debugger: Debugger) -> Result<(), Box<dyn Error>> {
+pub fn run_tui(debugger: Debugger, startup_msgs: Vec<String>) -> Result<(), Box<dyn Error>> {
     // Disable ANSI colors inside TUI — ratatui applies its own styles
     colored::control::set_override(false);
 
     let mut terminal = setup_terminal()?;
     let mut app = App::new(debugger);
+    for msg in startup_msgs {
+        app.push_log(msg);
+    }
+    app.debugger.execute("set autodis false");
+    app.debugger.execute("set autowhat false");
 
     // tape_visible defaults to loaded state
     for i in 0..7 {

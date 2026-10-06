@@ -177,6 +177,19 @@ impl fmt::Display for TapeEntry {
     }
 }
 
+/// 1-based line number for entry_idx, counting only non-Block entries.
+pub fn order_line_num(entries: &[TapeEntry], entry_idx: usize) -> usize {
+    entries[..=entry_idx].iter().filter(|e| !matches!(e, TapeEntry::Block(_))).count()
+}
+
+/// Entry index of the Nth non-Block entry (1-based line_num). Returns None if out of range.
+pub fn order_entry_idx(entries: &[TapeEntry], line_num: usize) -> Option<usize> {
+    entries.iter().enumerate()
+        .filter(|(_, e)| !matches!(e, TapeEntry::Block(_)))
+        .nth(line_num - 1)
+        .map(|(i, _)| i)
+}
+
 /// A tape loaded into a reader.
 #[derive(Clone, Debug)]
 pub struct Tape {
