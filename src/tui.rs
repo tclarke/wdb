@@ -63,6 +63,7 @@ struct App {
     show_dis: bool,
     show_state: bool,
     show_output: bool,
+    show_help: bool,
     running: bool,
     log: VecDeque<String>,
     // edit mode
@@ -105,6 +106,7 @@ impl App {
             show_dis: true,
             show_state: true,
             show_output: true,
+            show_help: false,
             running: false,
             log: VecDeque::with_capacity(LOG_CAP),
             edit: None,
@@ -526,6 +528,8 @@ impl App {
         }
         match kev.code {
             KeyCode::Char('q') => return true,
+            KeyCode::Char('?') => { self.show_help = !self.show_help; }
+            _ if self.show_help => { self.show_help = false; }
             KeyCode::Char(' ') => {
                 if self.debugger.machine.halted {
                     self.push_log("halted — use R to reset".to_string());
@@ -1056,6 +1060,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     render_status(f, app, status_area);
 
     if app.edit.is_some() { render_edit_popup(f, app, area); }
+    if app.show_help { render_help_popup(f, area); }
 }
 
 fn render_tape_panel(f: &mut ratatui::Frame, app: &App, area: Rect, tape_idx: usize, visible_height: usize) {
@@ -1472,6 +1477,76 @@ fn render_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
          Style::default().fg(Color::DarkGray))
     };
     f.render_widget(Paragraph::new(text).style(style), area);
+}
+
+fn render_help_popup(f: &mut ratatui::Frame, area: Rect) {
+    let lines: &[(&str, &str)] = &[
+        ("Navigation", ""),
+        ("Tab / Shift+Tab", "cycle focus"),
+        ("j/k  ↑/↓",        "scroll up/down"),
+        ("h/l  ←/→",        "scroll left/right (h/l in state/dis)"),
+        ("g / G",            "jump to top / bottom"),
+        ("", ""),
+        ("Execution", ""),
+        ("Space",            "run / pause"),
+        ("n",                "step one order"),
+        ("R",                "reset (rewind tape 1, seek block 1)"),
+        ("b",                "toggle breakpoint at cursor"),
+        ("Ctrl+C",           "stop running"),
+        ("", ""),
+        ("Tape editing", ""),
+        ("Enter",            "edit value at cursor"),
+        ("i / a",            "insert entry before / after cursor"),
+        ("x / Del",          "delete entry at cursor"),
+        ("", ""),
+        ("Load / unload", ""),
+        ("f",                "load tape into focused tape pane (fzf)"),
+        ("F",                "load all tapes from directory (fzf)"),
+        ("u / U",            "unload focused tape / all tapes"),
+        ("", ""),
+        ("Pane toggles", ""),
+        ("1–7",              "show/hide tape pane"),
+        ("S",                "show/hide state pane"),
+        ("D",                "show/hide disassembly pane"),
+        ("O",                "show/hide output pane"),
+        ("", ""),
+        ("Other", ""),
+        ("`",                "open CLI command prompt"),
+        ("q",                "quit"),
+        ("?",                "close this help"),
+    ];
+
+    let content_w = 62u16;
+    let content_h = lines.len() as u16 + 2;
+    let popup_w = content_w.min(area.width.saturating_sub(4));
+    let popup_h = content_h.min(area.height.saturating_sub(2));
+    let x = area.x + area.width.saturating_sub(popup_w) / 2;
+    let y = area.y + area.height.saturating_sub(popup_h) / 2;
+    let popup_area = Rect::new(x, y, popup_w, popup_h);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Help ")
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(popup_area);
+
+    let rendered: Vec<Line> = lines.iter().map(|(key, desc)| {
+        if key.is_empty() && desc.is_empty() {
+            Line::from("")
+        } else if desc.is_empty() {
+            // section header
+            Line::from(Span::styled(key.to_string(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+        } else {
+            Line::from(vec![
+                Span::styled(format!("  {:20}", key), Style::default().fg(Color::Cyan)),
+                Span::raw(desc.to_string()),
+            ])
+        }
+    }).collect();
+
+    f.render_widget(Clear, popup_area);
+    f.render_widget(block, popup_area);
+    f.render_widget(Paragraph::new(Text::from(rendered)), inner);
 }
 
 fn render_edit_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
