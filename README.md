@@ -2,6 +2,8 @@
 
 GDB-style debugger and simulator for the [WITCH computer](https://en.wikipedia.org/wiki/WITCH_computer) (1951, Harwell/Wolverhampton).
 
+NOTE: This is not a cycle accurate hardware emulator. It is a functional simulator meant to help debug programs. Therefore, behavior on the actual hardware may be slightly different. I'm not aware of any cycle accurate emulators but if you want something that is a closer to the actual hardware, including closer execution time, try [witchr](https://github.com/bkuker/witchr).
+
 ## Quick start
 
 ```sh
