@@ -108,6 +108,8 @@ pub struct Debugger {
     autodis: bool,
     autowhat: bool,
     last_cmd: LastCmd,
+    /// Stop `run` after this many steps (None = unlimited).
+    pub max_run_steps: Option<u64>,
 }
 
 impl Debugger {
@@ -119,6 +121,7 @@ impl Debugger {
             autodis: true,
             autowhat: true,
             last_cmd: LastCmd::None,
+            max_run_steps: None,
         }
     }
 
@@ -213,10 +216,18 @@ impl Debugger {
         });
 
         let mut output = Vec::new();
+        let mut steps: u64 = 0;
         loop {
             if !running.load(Ordering::SeqCst) {
                 output.push("^C — interrupted".yellow().to_string());
                 break;
+            }
+            if let Some(max) = self.max_run_steps {
+                if steps >= max {
+                    output.push(format!("stopped: step limit ({}) reached", max).yellow().to_string());
+                    break;
+                }
+                steps += 1;
             }
             if let Some(msg) = self.check_breakpoints() {
                 output.push(msg);
@@ -799,7 +810,7 @@ impl Debugger {
         lines
     }
 
-    fn cmd_help() -> Vec<String> {
+    pub(crate) fn cmd_help() -> Vec<String> {
         let cmds: &[(&str, &str)] = &[
             ("run / r",                        "run until halt or Ctrl-C"),
             ("step / s / next / n",            "execute one order"),

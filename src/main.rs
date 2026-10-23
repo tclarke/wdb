@@ -1,6 +1,7 @@
 mod debugger;
 mod disasm;
 mod machine;
+mod mcp;
 mod tape;
 mod tui;
 
@@ -18,11 +19,12 @@ fn main() {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("wdb {} — WITCH computer debugger", env!("CARGO_PKG_VERSION"));
-        println!("Usage: wdb [--batch] [--tui] [--color|--no-color] [tape-file]");
+        println!("Usage: wdb [--batch] [--tui] [--mcp] [--color|--no-color] [tape-file]");
         println!("  --version, -V  Print version");
         println!("  --help, -h     Print this help");
         println!("  --tui          Launch text user interface");
         println!("  --batch        Run tape non-interactively and exit");
+        println!("  --mcp          Run as an MCP server on stdio");
         println!("  --color        Force color output");
         println!("  --no-color     Disable color output");
         println!("Once running, type 'help' for debugger commands.");
@@ -65,6 +67,19 @@ fn main() {
         }
         let code = dbg.machine.halt_reason.as_ref().map(|r| r.exit_code()).unwrap_or(0);
         std::process::exit(code);
+    }
+
+    if args.iter().any(|a| a == "--mcp") {
+        colored::control::set_override(false);
+        // ponytail: fixed limit so a looping tape can't hang a tool call; add `set maxsteps` if agents need it
+        dbg.max_run_steps = Some(1_000_000);
+        if let Some(path) = tape_arg {
+            for line in dbg.execute(&format!("load {}", path)).into_iter().chain(dbg.execute("reset")) {
+                eprintln!("{}", line);
+            }
+        }
+        mcp::serve(dbg);
+        return;
     }
 
     let mut startup_msgs: Vec<String> = Vec::new();

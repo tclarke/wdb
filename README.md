@@ -45,6 +45,27 @@ Exit codes:
 | 9    | No layout set                    |
 | 10   | Same-group violation             |
 
+## MCP mode
+
+`wdb --mcp [tape-file]` runs wdb as a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio, so AI agents can drive the debugger. If a tape file is given it is loaded and reset at startup (messages go to stderr).
+
+It exposes a single tool, `wdb`, taking one argument `command` — any debugger command from `help` (`load`, `reset`, `step`, `run`, `dump`, `print`, `break`, ...). The result is the command's plain-text output (color is always off). Debugger state persists between calls.
+
+- `run` stops after 1,000,000 steps with `stopped: step limit (1000000) reached`; call `run` again to continue.
+- `quit` is rejected (the client controls the server's lifetime).
+
+Claude Code:
+
+```sh
+claude mcp add wdb -- wdb --mcp
+```
+
+Generic client config:
+
+```json
+{ "mcpServers": { "wdb": { "command": "wdb", "args": ["--mcp"] } } }
+```
+
 ## Tape format
 
 Compatible with the witchr simulator.
