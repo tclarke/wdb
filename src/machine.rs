@@ -289,9 +289,16 @@ impl Machine {
             decimal_add(dst_val, shifted, subtract).map_err(|_| HaltReason::Overflow(src, dst))?
         };
 
-        if clear_src && src >= 10 {
-            let sign_result = self.stores[(src - 10) as usize].negative;
-            self.stores[(src - 10) as usize] = if sign_result { WitchNum::NEG_ZERO } else { WitchNum::POS_ZERO };
+        if clear_src {
+            match src {
+                8 => self.acc.magnitude -= self.acc.magnitude % 10_000_000,
+                9 => self.acc = if self.acc.negative { WitchAcc::NEG_ZERO } else { WitchAcc::POS_ZERO },
+                s if s >= 10 => {
+                    let sign_result = self.stores[(s - 10) as usize].negative;
+                    self.stores[(s - 10) as usize] = if sign_result { WitchNum::NEG_ZERO } else { WitchNum::POS_ZERO };
+                }
+                _ => {}
+            }
         }
         self.write_addr(dst, result)
     }
@@ -305,10 +312,9 @@ impl Machine {
         let multiplicand = self.stores[(src - 10) as usize].to_i64();
         let multiplier = self.stores[(dst - 10) as usize].to_i64();
 
-        // Both at scale 10^-7. Product is at scale 10^-14 = 10^-7 relative to acc scale.
-        // acc += multiplicand * multiplier / 10^7
+        // Both at scale 10^-7. Product is at scale 10^-14; the acc is at scale 10^-15.
         let prod = multiplicand * multiplier; // 10^-14 scale
-        let prod_acc = prod / 10_000_000i64; // 10^-7 scale
+        let prod_acc = prod * 10; // 10^-15 scale
 
         let acc_val = if self.acc.negative {
             -(self.acc.magnitude as i64)
@@ -348,9 +354,10 @@ impl Machine {
             return Err(HaltReason::DivideByPosZero(Some(src)));
         }
 
-        // acc is dividend (at 10^-7 scale), divisor at 10^-7 scale.
-        // quotient_real = acc_real / divisor_real = acc_magnitude / divisor_magnitude (10^7 cancels)
-        // quotient at store scale (10^-7) = quotient_real * 10^7 = acc_magnitude * 10^7 / divisor_magnitude
+        // acc is dividend (at 10^-15 scale), divisor at 10^-7 scale.
+        // quotient at store scale (10^-7) = acc_magnitude * 10^-15 / (divisor * 10^-7) * 10^7
+        //                                 = acc_magnitude / (divisor * 10)
+        // remainder (acc scale) = acc - quotient * divisor * 10
         let acc_signed = if self.acc.negative {
             -(self.acc.magnitude as i64)
         } else {
@@ -358,10 +365,9 @@ impl Machine {
         };
 
         // Compute with i128 to avoid overflow in intermediate
-        let num = (acc_signed as i128) * 10_000_000;
-        let div = divisor as i128;
-        let quotient = num / div;
-        let remainder = acc_signed - ((quotient / 10_000_000) * divisor as i128) as i64;
+        let div = divisor as i128 * 10;
+        let quotient = acc_signed as i128 / div;
+        let remainder = (acc_signed as i128 - quotient * div) as i64;
 
         let quot_mag = quotient.unsigned_abs();
         if quot_mag >= 100_000_000 {
@@ -797,7 +803,8 @@ fn apply_shift(val: WitchNum, shift: u8, to_acc: bool) -> WitchNum {
 }
 
 fn is_permitted_00_09_pair(src: u8, dst: u8, clear: bool) -> bool {
-    if clear {
+    // Only allow clear orders if the src is the accumulator
+    if clear && src != 8 && src != 9 {
         return false;
     }
     matches!(
